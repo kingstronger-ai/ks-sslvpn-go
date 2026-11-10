@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>主题皮肤预览 · KSVPN</title>
+<link rel="stylesheet" href="app.css">
+<style>
+  /* 预览页专用的换肤条，正式系统里没有这个 */
+  .skinbar {
+    position: fixed; right: 18px; bottom: 18px; z-index: 999;
+    background: #fff; border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: 0 10px 34px rgba(12,24,33,.18); padding: 12px 14px;
+  }
+  .skinbar .ttl { font-size: 12px; color: var(--sub); margin-bottom: 9px; letter-spacing: .04em; }
+  .skinbar .row { display: flex; gap: 8px; }
+  .skinbar button {
+    border: 2px solid transparent; background: #fff; border-radius: 10px; cursor: pointer;
+    padding: 7px 10px; font-size: 12.5px; display: flex; align-items: center; gap: 6px; color: var(--txt);
+  }
+  .skinbar button i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+  .skinbar button.on { border-color: var(--primary); background: var(--primary-weak); font-weight: 600; }
+  /* 登录页页脚示例 */
+  .login-footer { position: absolute; left: 0; right: 0; bottom: 16px; }
+</style>
+</head>
+<body data-theme="teal">
+
+<div class="header">
+  <div class="brand">
+    <span class="logo-dot">◈</span>
+    <span style="color:var(--primary);font-style:italic">KSVPN</span>&nbsp;
+    <span style="color:var(--sub);font-style:italic">管理系统</span>
+  </div>
+  <div class="spacer"></div>
+  <div class="btn-exit">🎨 主题</div>
+  <div class="who">您好，<b>管理员</b></div>
+  <div class="btn-exit">⏻ 注销登录</div>
+</div>
+
+<div class="layout">
+  <div class="sidebar">
+    <div class="grp-title">运行监控</div>
+    <a class="active"><span>◎</span>运行概览</a>
+    <div class="sep"></div>
+    <div class="grp-title">用户与权限</div>
+    <a><span>👤</span>用户账号</a>
+    <a><span>⚙</span>用户策略</a>
+    <a><span>🔑</span>LDAP 目录</a>
+    <a><span>📶</span>在线会话</a>
+    <div class="sep"></div>
+    <div class="grp-title">连接管理</div>
+    <a><span>🗂</span>用户分组</a>
+    <a><span>🖧</span>连接配置</a>
+    <div class="sep"></div>
+    <div class="grp-title">系统设置</div>
+    <a><span>✉</span>邮件服务</a>
+    <a><span>🔒</span>证书管理</a>
+  </div>
+
+  <div class="main">
+    <div class="topbar"><h2>运行概览</h2><span class="muted" style="font-size:12.5px">系统版本 1.0.0</span></div>
+
+    <div class="stat-grid">
+      <div class="stat"><div class="ico" style="background:linear-gradient(140deg,var(--primary),var(--primary-lite))">◈</div>
+        <div><div class="num">3</div><div class="label">运行中的连接</div></div></div>
+      <div class="stat"><div class="ico" style="background:linear-gradient(140deg,#15803d,#22b357)">👤</div>
+        <div><div class="num">128</div><div class="label">用户账号</div></div></div>
+      <div class="stat"><div class="ico" style="background:linear-gradient(140deg,#b45309,#e08b1f)">🖧</div>
+        <div><div class="num">42</div><div class="label">在线会话</div></div></div>
+    </div>
+
+    <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
+      <div class="card" style="flex:2;min-width:320px">
+        <h3>✎ 其它信息</h3>
+        <table>
+          <tr><th style="width:60px">编号</th><th>名称</th><th>记录值</th></tr>
+          <tr><td>1</td><td>运行的实例数</td><td><span class="badge blue">1</span></td></tr>
+          <tr><td>2</td><td>服务数/分组数</td><td><span class="badge ok">3/2</span></td></tr>
+          <tr><td>3</td><td>VPN服务版本</td><td>OpenVPN 2.6.14</td></tr>
+          <tr><td>4</td><td>服务器IP地址</td><td>172.16.0.2</td></tr>
+          <tr><td>5</td><td>数据库</td><td>SQLite（/var/lib/sslvpn）</td></tr>
+        </table>
+      </div>
+      <div class="card" style="flex:1;min-width:280px">
+        <h3>💡 使用步骤</h3>
+        <ol style="line-height:2.1;color:#606266;padding-left:18px;font-size:13px">
+          <li>点击右上角 <b>⚙ 全局配置</b>，确认<b>服务器公网地址</b>正确（用于生成客户端配置）。</li>
+          <li>连接管理 → <b>用户分组</b> → 添加分组。</li>
+          <li>连接管理 → <b>连接配置</b> → 添加连接。</li>
+          <li>连接管理 → <b>连接配置</b> → 关联分组。</li>
+          <li>用户与权限 → <b>用户账号</b> → 添加用户（或从 LDAP 目录同步）。</li>
+          <li>下载用户配置文件，导入客户端连接测试。</li>
+        </ol>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>📶 在线会话 <span class="hint">共 42 人</span></h3>
+      <div class="inline" style="margin-bottom:12px">
+        <button class="primary">＋ 添加连接</button>
+        <button class="ghost">⟳ 刷新</button>
+        <button class="danger">🗑 删除</button>
+      </div>
+      <table>
+        <tr><th>用户名</th><th>来源 IP</th><th>虚拟 IP</th><th>连接时长</th><th>操作</th></tr>
+        <tr><td>zhangsan</td><td>203.0.113.10</td><td>10.8.0.6</td><td>02:14:38</td><td><a class="lk">详情</a> <a class="lk r">断开</a></td></tr>
+        <tr><td>lisi</td><td>223.5.5.5</td><td>10.8.0.9</td><td>00:41:02</td><td><a class="lk">详情</a> <a class="lk r">断开</a></td></tr>
+      </table>
+    </div>
+    <div class="page-footer"><a href="https://example.com" target="_blank" rel="noopener">© 2026-至今 Power by KingStronger</a></div>
+  </div>
+</div>
+
+<div class="skinbar">
+  <div class="ttl">主题皮肤（正式系统在右上角「🎨 主题」）</div>
+  <div class="row" id="skinRow"></div>
+</div>
+
+<script>
+const THEMES = [
+  { key: "teal",     name: "深青",  primary: "#0f766e", nav: "#101d26" },
+  { key: "indigo",   name: "靛蓝",  primary: "#4338ca", nav: "#151a2e" },
+  { key: "ocean",    name: "深海蓝", primary: "#1d4ed8", nav: "#0d1a2f" },
+  { key: "sky",      name: "淡蓝",  primary: "#0284c7", nav: "#0c2135" },
+  { key: "graphite", name: "石墨灰", primary: "#334155", nav: "#0f172a" },
+  { key: "clay",     name: "赤陶",  primary: "#a5471f", nav: "#231913" },
+  { key: "light",    name: "浅色",  primary: "#0f766e", nav: "#f5f7f9" },
+];
+const row = document.getElementById("skinRow");
+row.innerHTML = THEMES.map(t => `<button data-k="${t.key}"><i style="background:${t.primary}"></i>${t.name}</button>`).join("");
+function set(k) {
+  document.body.setAttribute("data-theme", k);
+  row.querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.k === k));
+}
+row.querySelectorAll("button").forEach(b => b.onclick = () => set(b.dataset.k));
+set("teal");
+</script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+services:
+  sslvpn:
+    build: .
+    container_name: sslvpn-go
+    restart: unless-stopped
+    ports:
+      - "58443:8443"     # Web 管理界面 (HTTPS)；容器内固定 8443，宿主侧用 58443
+      # - "8080:8080"    # API（明文，仅供容器内/反代内网调用；对外交付请保持关闭）
+      - "51194:51194/udp"  # VPN 实例端口（容器内外同号）。请在「连接配置 → 编辑实例」把监听端口也设为 51194，
+                           # 这样客户端 .ovpn 的 remote <公网地址> 51194 与对外端口一致；改后重启实例并重新下发配置
+                           # 多实例请在「连接配置」改各实例监听端口，并在此逐个追加映射
+    environment:
+      - SSLVPN_WEB_PORT=8443
+      - SSLVPN_API_PORT=8080
+      - SSLVPN_TRIAL_DAYS=15  # 未激活时的试用天数（与程序内置默认一致）
+      # 接口前缀：规范路径固定为 /api/v1；此开关只控制旧路径别名（裸路径 /api/xxx）是否保留
+      # - SSLVPN_API_LEGACY_ALIAS=0   # 关掉旧前缀，仅保留 /api/v1
+      # 浮动许可（-bind none）在线登记服务，启用后同一许可只能一台机器激活
+      # - SSLVPN_LICENSE_REGISTER=https://授权方IP:8790
+      # - SSLVPN_LICENSE_SECRET=your-secret
+    volumes:
+      - sslvpn-data:/var/lib/sslvpn
+      - sslvpn-openvpn:/etc/openvpn
+    cap_add:
+      - NET_ADMIN          # 管理 tun 设备与 iptables
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.ip_forward=1
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  sslvpn-data:
+  sslvpn-openvpn:

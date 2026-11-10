@@ -1,0 +1,14 @@
+# 统一换行：仓库内一律存储 LF，避免 shell 脚本在 Linux 容器里出现 CRLF 导致 "bad interpreter"
+* text=auto
+
+*.sh   text eol=lf
+*.pem  text eol=lf
+*.tmpl text eol=lf
+
+# 二进制：禁止换行转换与 diff
+*.exe  binary
+*.pkg  binary
+*.zip  binary
+*.gz   binary
+*.png  binary
+*.ico  binary

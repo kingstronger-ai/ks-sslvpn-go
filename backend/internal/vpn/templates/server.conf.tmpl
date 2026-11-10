@@ -1,0 +1,60 @@
+# OpenVPN 服务端配置（由 SSLVPN 管理系统渲染生成，请勿手工编辑）
+port {{.S.Port}}
+proto {{.S.Proto}}
+dev tun
+server {{.S.Subnet}} {{.S.Mask}}
+{{- if .Routes}}
+{{- range .Routes}}
+push "route {{.}}"
+{{- end}}
+{{- end}}
+{{- if .RedirectGW}}
+# 全局代理：全部流量 + DNS 都走 VPN
+push "redirect-gateway def1 bypass-dhcp"
+{{- range .DNS}}
+push "dhcp-option DNS {{.}}"
+{{- end}}
+{{- else}}
+# 分流模式（未勾选全局代理）：只把上面列出的网段/域名走 VPN，
+# 其余流量与 DNS 解析交给客户端本地网络处理（因此不推送 DNS）
+{{- end}}
+{{- if .ClientToClient}}
+client-to-client
+{{- end}}
+client-config-dir {{.InstanceDir}}/ccd
+{{- if .DuplicateCN}}
+duplicate-cn
+{{- end}}
+max-clients {{.S.MaxClients}}
+ca {{.PKIDir}}/ca.crt
+cert {{.PKIDir}}/issued/{{.S.Name}}.crt
+key {{.PKIDir}}/private/{{.S.Name}}.key
+dh none
+tls-server
+tls-groups prime256v1
+tls-auth {{.InstanceDir}}/ta.key 0
+cipher AES-256-GCM
+auth SHA256
+# 注意：不要在此处降权（user/group）。
+# OpenVPN 降权后无法写 ifconfig-pool-persist、status.log，也无法执行 hooks 写入数据库，
+# 会导致实例启动直接失败（exit 1）。容器本身已用独立命名空间 + 仅授予 NET_ADMIN 隔离。
+writepid {{.InstanceDir}}/vpn.pid
+keepalive 10 60
+persist-key
+persist-tun
+topology subnet
+push "topology subnet"
+ifconfig-pool-persist {{.InstanceDir}}/ipp.txt
+status {{.InstanceDir}}/status.log 1
+log-append {{.InstanceDir}}/openvpn.log
+verb 3
+client-connect {{.HookDir}}/connect.sh
+client-disconnect {{.HookDir}}/disconnect.sh
+script-security 2
+auth-user-pass-verify {{.HookDir}}/auth.sh via-file
+verify-client-cert require
+reneg-sec 0
+auth-nocache
+sndbuf 0
+rcvbuf 0
+txqueuelen 1000

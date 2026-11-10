@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>KSVPN · 新视觉样张</title>
+<link rel="stylesheet" href="app.css">
+<style>
+  body { background: var(--bg); }
+  .demo-bar { position: fixed; right: 16px; bottom: 16px; background: #16202a; color: #fff; font-size: 12px;
+    padding: 8px 14px; border-radius: 8px; opacity: .85; z-index: 999; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="brand"><span class="logo-dot">◈</span>
+    <span style="color:var(--primary);font-style:italic">KSVPN</span>&nbsp;
+    <span style="color:var(--sub);font-style:italic">管理系统</span></div>
+  <div class="spacer"></div>
+  <div class="btn-exit">⚙ 全局配置</div>
+  <div class="who">您好，<b>管理员</b></div>
+  <div class="btn-exit" id="btnLogout">⏻ 注销登录</div>
+</div>
+
+<div class="layout">
+  <div class="sidebar">
+    <div class="grp-title">运行监控</div>
+    <a class="active"><span>◎</span>运行概览</a>
+    <div class="sep"></div>
+    <div class="grp-title">用户与权限</div>
+    <a><span>👤</span>用户账号</a>
+    <a><span>⚙</span>用户策略</a>
+    <a><span>🔑</span>LDAP 目录</a>
+    <a><span>📶</span>在线会话</a>
+    <div class="sep"></div>
+    <div class="grp-title">连接管理</div>
+    <a><span>🗂</span>用户分组</a>
+    <a><span>🖧</span>连接配置</a>
+    <div class="sep"></div>
+    <div class="grp-title">系统设置</div>
+    <a><span>💾</span>备份恢复</a>
+    <a><span>✉</span>邮件服务</a>
+    <a><span>☑</span>全局设置</a>
+    <a><span>🧱</span>访问控制</a>
+    <a><span>🛡</span>管理员</a>
+    <a><span>🔐</span>许可管理</a>
+    <a><span>🔒</span>证书管理</a>
+    <div class="sep"></div>
+    <div class="grp-title">日志审计</div>
+    <a><span>📋</span>认证日志</a>
+    <a><span>📄</span>系统日志</a>
+  </div>
+
+  <div class="main">
+    <div class="topbar">
+      <h2>运行概览</h2>
+      <div class="inline">
+        <button class="ghost small">刷新</button>
+        <button class="primary small">＋ 新建用户</button>
+      </div>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat"><div class="ico" style="background:linear-gradient(140deg,#0f766e,#12a594)">👥</div>
+        <div><div class="num">128</div><div class="label">用户总数 · 在线 37</div></div></div>
+      <div class="stat"><div class="ico" style="background:linear-gradient(140deg,#0e7490,#22a2b8)">🖧</div>
+        <div><div class="num">3</div><div class="label">连接配置 · 全部运行中</div></div></div>
+      <div class="stat"><div class="ico" style="background:linear-gradient(140deg,#b45309,#d97706)">⚡</div>
+        <div><div class="num">12%</div><div class="label">CPU 负载 · 8 核</div></div></div>
+      <div class="stat"><div class="ico" style="background:linear-gradient(140deg,#15803d,#22a05a)">💾</div>
+        <div><div class="num">41%</div><div class="label">磁盘占用 · 120G</div></div></div>
+    </div>
+
+    <div class="card">
+      <h3>👤 用户账号 <span class="hint">搜索 / 导出 / 按分组显示</span></h3>
+      <div class="tip-banner">ⓘ 这是一个提示条的新配色示例。支持 <code>{占位符}</code> 与 HTML，文字已放大到 14px。</div>
+      <div class="form-row"><label>用户名</label><input value="demo-user" style="max-width:260px">
+        <div class="inline" style="margin-left:12px"><button class="primary">保存</button><button class="ghost">取消</button>
+        <button class="orange small">⟲ 恢复默认</button><button class="danger small">删除</button></div></div>
+      <table style="margin-top:6px">
+        <tr><th>用户名</th><th>认证方式</th><th>分组</th><th>客户端 IP</th><th>状态</th><th>操作</th></tr>
+        <tr><td><b>demo-user</b></td><td>本地密码</td><td>研发部</td><td><b style="color:var(--primary)">10.0.0.2</b></td>
+          <td><span class="badge ok">在线</span></td><td><a class="lk">编辑</a> <a class="lk o">发邮件</a> <a class="lk r">删除</a></td></tr>
+        <tr><td><b>lisi</b></td><td>LDAP 统一认证</td><td>市场部</td><td>-</td>
+          <td><span class="badge gray">离线</span></td><td><a class="lk">编辑</a> <a class="lk o">发邮件</a> <a class="lk r">删除</a></td></tr>
+        <tr><td><b>zhangsan</b></td><td>TOTP 动态口令</td><td>运维部</td><td><b style="color:var(--primary)">10.0.0.7</b></td>
+          <td><span class="badge blue">已锁定</span></td><td><a class="lk">编辑</a> <a class="lk o">发邮件</a> <a class="lk r">删除</a></td></tr>
+      </table>
+    </div>
+
+    <div class="card wide">
+      <h3>🔒 证书管理 <span class="hint">保存后立即生效，无需重启</span></h3>
+      <div class="form-row"><label>证书内容</label>
+        <textarea style="min-height:88px;font-size:12px" placeholder="-----BEGIN CERTIFICATE-----">-----BEGIN CERTIFICATE-----
+MIIDdzCCAl+gAwIBAgIUXf9...
+-----END CERTIFICATE-----</textarea></div>
+      <div class="form-row"><label></label><div class="inline">
+        <button class="primary">✓ 更新证书配置</button>
+        <span class="muted" style="font-size:12px">保存前会自动校验证书与私钥是否配对。</span></div></div>
+    </div>
+    <div class="page-footer"><a href="https://example.com" target="_blank" rel="noopener">© 2026-至今 Power by KingStronger</a></div>
+  </div>
+</div>
+<div class="demo-bar">静态样张 · 仅用于确认配色与排版</div>
+</body>
+</html>

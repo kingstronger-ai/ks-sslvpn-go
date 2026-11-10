@@ -1,0 +1,50 @@
+# SSLVPN-Go —— NAS / 通用 Docker 部署模板（飞牛 fnOS、群晖、Unraid、普通 Linux 均可）
+#
+# 用法：
+#   1) 建目录：/vol1/1000/docker/sslvpn（飞牛），把本文件复制进去并改名 docker-compose.yml
+#      源码也放同目录（若用“本机构建”方式），或改用下面的 image: 方式加载离线镜像
+#   2) 飞牛：Docker → Compose → 新增项目 → 选该目录 → 创建项目后立即启动
+#   3) 访问 https://<NAS地址>:8443 ，默认 admin / ChangeMe（首次登录请立刻改）
+#
+# 两种取镜像的方式，二选一：
+#   A. 本机构建（需源码 + 能拉 golang:1.22-alpine / debian:12-slim）：保留 build: .
+#   B. 离线导入（推荐，NAS 上不用编译）：在别处 docker save 后 docker load，然后注掉 build: .
+#
+# 注意：OpenVPN 必须拿到 tun 设备与 NET_ADMIN，这三处不能删：
+#   cap_add: NET_ADMIN / NET_RAW、devices: /dev/net/tun、sysctls: net.ipv4.ip_forward=1
+
+services:
+  sslvpn:
+    # 方式 B 使用离线镜像时，tag 要与 docker save 的镜像名一致
+    image: sslvpn-go:latest
+    build: .
+    container_name: sslvpn-go
+    restart: unless-stopped
+    ports:
+      - "58443:8443"     # Web 管理界面 (HTTPS)；容器内固定 8443，宿主侧用 58443
+      # - "8080:8080"    # API（明文，仅内网/反代需要，可删）
+      - "51194:51194/udp"  # VPN 实例端口（容器内外同号，与 UI 中实例监听端口保持一致；多实例逐个追加）
+    environment:
+      - SSLVPN_WEB_PORT=8443
+      - SSLVPN_API_PORT=8080
+      - SSLVPN_TRIAL_DAYS=15  # 未激活时的试用天数（与程序内置默认一致）
+      - TZ=Asia/Shanghai
+      # - SSLVPN_API_LEGACY_ALIAS=0
+      # - SSLVPN_LICENSE_REGISTER=https://license.example.com
+      # - SSLVPN_LICENSE_SECRET=your-secret
+    volumes:
+      # NAS 上用绑定目录，方便快照/备份/迁移（换成你自己的存储路径）
+      - /vol1/1000/docker/sslvpn/data:/var/lib/sslvpn
+      - /vol1/1000/docker/sslvpn/openvpn:/etc/openvpn
+    cap_add:
+      - NET_ADMIN          # 建 tun、写 iptables NAT
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.ip_forward=1
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

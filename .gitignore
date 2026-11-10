@@ -1,0 +1,14 @@
+# 授权签发私钥：绝不提交、绝不打包给客户
+deploy/keys/license-private.pem
+*.pem.bak
+license-private.pem
+
+# 构建产物 / 历史交付包
+sslvpn-*.tar.gz
+backend/sslvpn
+backend/sslvpn.exe
+
+# 客户端安装包二进制：体积大且内嵌网关地址，不进仓库
+# 需要内置包时自行放进 deploy/downloads/（构建镜像会用），或从后台「上传安装包」上传
+deploy/downloads/*.exe
+deploy/downloads/*.pkg
