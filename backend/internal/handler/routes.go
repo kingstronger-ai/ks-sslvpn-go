@@ -4,6 +4,8 @@ package handler
 import (
 	"net/http"
 	"strings"
+
+	"sslvpn/internal/license"
 )
 
 // APIPrefix 后端接口的统一路径前缀（对外契约）。
@@ -23,6 +25,17 @@ var Routes = map[string]Route{}
 
 func reg(method, path string, auth bool, h http.HandlerFunc) {
 	Routes[path] = Route{Method: method, Auth: auth, H: h}
+}
+
+// regF 注册需要授权档位的接口：请求先过 gateFeature（未开启该功能返回 403 + 升级提示），
+// 再进入原 handler。用于专业版 / 企业版功能的后端硬拦截。
+func regF(method, path string, auth bool, feature string, h http.HandlerFunc) {
+	reg(method, path, auth, func(w http.ResponseWriter, r *http.Request) {
+		if !gateFeature(w, feature) {
+			return
+		}
+		h(w, r)
+	})
 }
 
 func init() {
@@ -99,14 +112,23 @@ func init() {
 	reg("POST", "/system/updateDownloadUrl", true, SysUpdateDownloadURL)
 	reg("POST", "/system/updateKeyFile", true, SysUpdateKeyFile)
 	reg("GET", "/system/getKeyFile", true, SysGetKeyFile)
-	// ---- 证书自动续签（Let's Encrypt + 阿里云/腾讯云 DNS）----
-	reg("GET", "/cert/auto/get", true, CertAutoGet)
-	reg("POST", "/cert/auto/save", true, CertAutoSave)
-	reg("POST", "/cert/auto/test", true, CertAutoTestDNS)
-	reg("POST", "/cert/auto/issue", true, CertAutoIssue)
-	reg("GET", "/cert/auto/status", true, CertAutoStatus)
+	// ---- 证书自动续签（Let's Encrypt + 阿里云/腾讯云 DNS）——企业版功能 ----
+	regF("GET", "/cert/auto/get", true, license.FeatACMERenew, CertAutoGet)
+	regF("POST", "/cert/auto/save", true, license.FeatACMERenew, CertAutoSave)
+	regF("POST", "/cert/auto/test", true, license.FeatACMERenew, CertAutoTestDNS)
+	regF("POST", "/cert/auto/issue", true, license.FeatACMERenew, CertAutoIssue)
+	regF("GET", "/cert/auto/status", true, license.FeatACMERenew, CertAutoStatus)
 	reg("GET", "/system/rebootNginx", true, SysRebootWeb)
 	reg("GET", "/system/backup", true, SysBackup)
+
+	// ---- 在线升级（检测/确认/状态/回滚；实际替换由宿主机代理执行）----
+	reg("GET", "/upgrade/version", true, UpgradeVersion)
+	reg("GET", "/upgrade/check", true, UpgradeCheck)
+	reg("POST", "/upgrade/apply", true, UpgradeApply)
+	reg("GET", "/upgrade/status", true, UpgradeStatus)
+	reg("GET", "/upgrade/backups", true, UpgradeBackups)
+	reg("GET", "/upgrade/log", true, UpgradeLog)
+	reg("POST", "/upgrade/rollback", true, UpgradeRollback)
 	reg("GET", "/system/getBackupInfo", true, SysBackupInfo)
 	reg("GET", "/system/getMailTemplate", true, MailTemplateGet)
 	reg("POST", "/system/updateMailTemplate", true, MailTemplateUpdate)
@@ -123,12 +145,12 @@ func init() {
 	reg("POST", "/system/downloadBackupFile", true, SysBackupDownload)
 	reg("POST", "/system/deleteBackupFile", true, SysBackupDelete)
 	reg("POST", "/system/submitUpload", true, SysBackupUpload)
-	// ---- 客户端下载：开关 / 可见范围 / 单独上传 Windows、macOS 安装包 ----
-	reg("GET", "/system/clientDownload/get", true, ClientDownloadConfigGet)
-	reg("POST", "/system/clientDownload/save", true, ClientDownloadConfigSave)
-	reg("POST", "/system/clientDownload/upload", true, ClientDownloadUpload)
-	reg("POST", "/system/clientDownload/delete", true, ClientDownloadDelete)
-	reg("POST", "/system/clientDownload/mail", true, ClientDownloadMail)
+	// ---- 客户端下载：开关 / 可见范围 / 单独上传 Windows、macOS 安装包 —— 专业版功能 ----
+	regF("GET", "/system/clientDownload/get", true, license.FeatClientDownload, ClientDownloadConfigGet)
+	regF("POST", "/system/clientDownload/save", true, license.FeatClientDownload, ClientDownloadConfigSave)
+	regF("POST", "/system/clientDownload/upload", true, license.FeatClientDownload, ClientDownloadUpload)
+	regF("POST", "/system/clientDownload/delete", true, license.FeatClientDownload, ClientDownloadDelete)
+	regF("POST", "/system/clientDownload/mail", true, license.FeatClientDownload, ClientDownloadMail)
 	reg("GET", "/system/loginAlias/get", true, LoginAliasGet)
 	reg("POST", "/system/loginAlias/save", true, LoginAliasSave)
 	reg("POST", "/system/submitSysName", true, SysUpdateName)
@@ -141,16 +163,16 @@ func init() {
 	reg("GET", "/system/getOtherInfo", true, SysGetOtherInfo)
 	reg("GET", "/system/getSmtpInfo", true, SysGetSMTP)
 
-	// ---- CCD ----
-	reg("GET", "/ccd/", true, CcdList)
-	reg("GET", "/ccd/userlist", true, CcdUserList)
-	reg("POST", "/ccd/addccdCfg", true, CcdAdd)
-	reg("DELETE", "/ccd/remove", true, CcdRemove)
-	reg("POST", "/ccd/update", true, CcdUpdate)
-	reg("GET", "/ccd/getAllUser", true, CcdAllUser)
-	reg("POST", "/ccd/copySubmit", true, CcdCopy)
-	reg("POST", "/ccd/batchDeleteCcd", true, CcdBatchDelete)
-	reg("POST", "/ccd/getServiceInCcd", true, CcdServiceIn)
+	// ---- CCD —— 专业版功能 ----
+	regF("GET", "/ccd/", true, license.FeatCCD, CcdList)
+	regF("GET", "/ccd/userlist", true, license.FeatCCD, CcdUserList)
+	regF("POST", "/ccd/addccdCfg", true, license.FeatCCD, CcdAdd)
+	regF("DELETE", "/ccd/remove", true, license.FeatCCD, CcdRemove)
+	regF("POST", "/ccd/update", true, license.FeatCCD, CcdUpdate)
+	regF("GET", "/ccd/getAllUser", true, license.FeatCCD, CcdAllUser)
+	regF("POST", "/ccd/copySubmit", true, license.FeatCCD, CcdCopy)
+	regF("POST", "/ccd/batchDeleteCcd", true, license.FeatCCD, CcdBatchDelete)
+	regF("POST", "/ccd/getServiceInCcd", true, license.FeatCCD, CcdServiceIn)
 
 	// ---- 分组 ----
 	reg("GET", "/group/list", true, GroupList)
@@ -158,8 +180,8 @@ func init() {
 	reg("POST", "/group/removeGroup", true, GroupRemove)
 	reg("POST", "/group/update", true, GroupUpdate)
 
-	// ---- 服务实例 ----
-	reg("POST", "/service/add", true, ServiceAdd)
+	// ---- 服务实例 ----（新增实例为企业版功能；既有实例的管理不受限）
+	regF("POST", "/service/add", true, license.FeatMultiInstance, ServiceAdd)
 	reg("GET", "/service/list", true, ServiceList)
 	reg("POST", "/service/stop", true, ServiceStop)
 	reg("POST", "/service/start", true, ServiceStart)
@@ -185,37 +207,39 @@ func init() {
 	reg("GET", "/fw/getPortRuleList", true, FWRuleList)
 	reg("POST", "/fw/addPortRule", true, FWAddRule)
 
-	// ---- 域名分流（域名 → 定时解析 IPv4 → /32 路由下发）----
-	reg("GET", "/domainRoute/list", true, DomainRouteList)
-	reg("POST", "/domainRoute/add", true, DomainRouteAdd)
-	reg("POST", "/domainRoute/addMulti", true, DomainRouteAddMulti)
-	reg("POST", "/domainRoute/update", true, DomainRouteUpdate)
-	reg("POST", "/domainRoute/delete", true, DomainRouteDelete)
-	reg("POST", "/domainRoute/resolve", true, DomainRouteResolve)
-	reg("POST", "/domainRoute/apply", true, DomainRouteApply)
-	reg("GET", "/ldap/get", true, LdapGet)
-	reg("GET", "/ldap/set", true, LdapSet)
-	reg("GET", "/ldap/listusers", true, LdapListUsers)
-	reg("GET", "/ldap/ping", true, LdapPing)
-	reg("POST", "/ldap/test", true, LdapTest)
-	reg("GET", "/ldap/synchronization", true, LdapSync)
-	reg("POST", "/ldap/import", true, LdapImport)
-	reg("POST", "/ldap/update", true, LdapUpdate)
+	// ---- 域名分流（域名 → 定时解析 IPv4 → /32 路由下发）—— 专业版功能 ----
+	regF("GET", "/domainRoute/list", true, license.FeatDomainRoute, DomainRouteList)
+	regF("POST", "/domainRoute/add", true, license.FeatDomainRoute, DomainRouteAdd)
+	regF("POST", "/domainRoute/addMulti", true, license.FeatDomainRoute, DomainRouteAddMulti)
+	regF("POST", "/domainRoute/update", true, license.FeatDomainRoute, DomainRouteUpdate)
+	regF("POST", "/domainRoute/delete", true, license.FeatDomainRoute, DomainRouteDelete)
+	regF("POST", "/domainRoute/resolve", true, license.FeatDomainRoute, DomainRouteResolve)
+	regF("POST", "/domainRoute/apply", true, license.FeatDomainRoute, DomainRouteApply)
+	// ---- LDAP / AD 目录集成 —— 专业版功能（仅管理配置；客户端密码登录 /profile/account 不受限）----
+	regF("GET", "/ldap/get", true, license.FeatLDAP, LdapGet)
+	regF("GET", "/ldap/set", true, license.FeatLDAP, LdapSet)
+	regF("GET", "/ldap/listusers", true, license.FeatLDAP, LdapListUsers)
+	regF("GET", "/ldap/ping", true, license.FeatLDAP, LdapPing)
+	regF("POST", "/ldap/test", true, license.FeatLDAP, LdapTest)
+	regF("GET", "/ldap/synchronization", true, license.FeatLDAP, LdapSync)
+	regF("POST", "/ldap/import", true, license.FeatLDAP, LdapImport)
+	regF("POST", "/ldap/update", true, license.FeatLDAP, LdapUpdate)
 	reg("GET", "/license/accept", true, LicenseAccept)
 
-	// ---- 飞书扫码登录（公开：客户端与浏览器直接访问，内部各自校验）----
+	// ---- 扫码登录（公开：客户端与浏览器直接访问，内部各自校验）—— 专业版功能 ----
 	// 对外路径即 /api/v1/device/start、/api/v1/device/poll、/api/v1/profile/feishu、
-	// /api/v1/profile/account、/api/v1/token/verify（与既有客户端/网关脚本保持一致；
-	// profile/account 的密码字段同时接受 password 与 secret，兼容 v0.4.6+ macOS 客户端）。
-	reg("POST", "/device/start", false, SSODeviceStart)
-	reg("POST", "/device/poll", false, SSODevicePoll)
-	reg("POST", "/profile/feishu", false, SSOProfile)
+	// /api/v1/token/verify（与既有客户端/网关脚本保持一致；
+	// profile/account 的密码字段同时接受 password 与 secret，兼容 v0.4.6+ macOS 客户端，
+	// 且该端点同时承载本地 / TOTP 账号登录，不按 SSO 拦截）。
+	regF("POST", "/device/start", false, license.FeatSSO, SSODeviceStart)
+	regF("POST", "/device/poll", false, license.FeatSSO, SSODevicePoll)
+	regF("POST", "/profile/feishu", false, license.FeatSSO, SSOProfile)
 	reg("POST", "/profile/account", false, LDAPProfile)
-	reg("POST", "/token/verify", false, SSOTokenVerify)
+	regF("POST", "/token/verify", false, license.FeatSSO, SSOTokenVerify)
 	// 管理端配置
-	reg("GET", "/system/getFeishu", true, SSOCfgGet)
-	reg("POST", "/system/updateFeishu", true, SSOCfgSave)
-	reg("POST", "/system/testFeishu", true, SSOTest)
+	regF("GET", "/system/getFeishu", true, license.FeatSSO, SSOCfgGet)
+	regF("POST", "/system/updateFeishu", true, license.FeatSSO, SSOCfgSave)
+	regF("POST", "/system/testFeishu", true, license.FeatSSO, SSOTest)
 }
 
 // APIPath 把路由表里的基路径拼成对外完整路径，如 /logincheck -> /api/v1/logincheck

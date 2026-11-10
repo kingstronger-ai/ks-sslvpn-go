@@ -1,0 +1,8 @@
+{
+  "version": "1.2.0",
+  "released_at": "2026-11-10",
+  "notes": "新增在线升级：版本检测 / 确认升级 / 升级前自动备份 / 一键回滚；修复企业版功能前端未同步限制。",
+  "package": "/opt/sslvpn-upgrade/packages/sslvpn-go-v1.2.0.tar.gz",
+  "sha256": "请替换为实际包的 sha256（64 位小写十六进制）",
+  "min_version": "1.2.0"
+}

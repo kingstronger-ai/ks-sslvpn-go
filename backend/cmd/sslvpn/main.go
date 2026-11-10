@@ -26,6 +26,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -100,7 +101,8 @@ func main() {
 		expire := fs.String("expire", "", "到期日 YYYY-MM-DD")
 		days := fs.Int("days", 0, "自今天起有效天数（未给 -expire 时生效，默认 365）")
 		keyPath := fs.String("key", "license-private.pem", "签发私钥 PEM 路径")
-		edition := fs.String("edition", "standard", "版本标识（如 standard/pro）")
+		edition := fs.String("edition", "community", "授权档位：community=社区版 / pro=专业版 / enterprise=企业版")
+		features := fs.String("features", "", "显式功能清单（逗号分隔，留空按档位自动推导）：domain_route,sso,ccd,ldap,client_download,multi_instance,private_issuance,acme_auto_renew")
 		nodes := fs.Int("nodes", 0, "授权台数上限（浮动许可默认 1，0 为不限）")
 		_ = fs.Parse(os.Args[2:])
 
@@ -165,10 +167,18 @@ func main() {
 			fmt.Printf("错误：读取私钥失败（%s）：%v\n", *keyPath, err)
 			os.Exit(1)
 		}
-		token, err := license.Sign(license.Payload{
+		var feats []string
+		for _, f := range strings.Split(*features, ",") {
+			f = strings.ToLower(strings.TrimSpace(f))
+			if f != "" {
+				feats = append(feats, f)
+			}
+		}
+		p := license.Payload{
 			ID: *id, Bind: mode, Machine: *machine, Customer: name, Company: name,
-			Email: mail, Expire: exp, Edition: *edition, Nodes: *nodes,
-		}, priv)
+			Email: mail, Expire: exp, Edition: *edition, Nodes: *nodes, Features: feats,
+		}
+		token, err := license.Sign(p, priv)
 		if err != nil {
 			fmt.Println("错误：签发失败：", err)
 			os.Exit(1)
@@ -177,9 +187,15 @@ func main() {
 		if mode == license.BindNone {
 			bindDesc = "不绑定机器（浮动许可，同时仅 " + fmt.Sprint(*nodes) + " 台）"
 		}
+		enabled := p.EnabledFeatures()
+		sort.Strings(enabled)
 		fmt.Println("──────────────────────────────────────────")
-		fmt.Printf("许可编号: %s\n客户公司: %s\n授权邮箱: %s\n绑定方式: %s\n到期日  : %s\n版本    : %s\n",
-			*id, name, mail, bindDesc, exp, *edition)
+		fmt.Printf("许可编号: %s\n客户公司: %s\n授权邮箱: %s\n绑定方式: %s\n到期日  : %s\n版本    : %s（档位 %s）\n",
+			*id, name, mail, bindDesc, exp, *edition, p.Tier())
+		if len(feats) > 0 {
+			fmt.Printf("显式功能: %s\n", strings.Join(feats, ", "))
+		}
+		fmt.Printf("开启功能: %s\n", strings.Join(enabled, ", "))
 		fmt.Println("──────────────────────────────────────────")
 		fmt.Println("许可串（复制整行发给客户，粘贴到「授权管理 → 激活许可」）：")
 		fmt.Println(token)
@@ -216,9 +232,15 @@ func main() {
 		if p.Unbound() {
 			bindDesc = "不绑定机器（浮动许可）"
 		}
+		enabled := p.EnabledFeatures()
+		sort.Strings(enabled)
 		fmt.Println("──────────────────────────────────────────")
-		fmt.Printf("许可编号: %s\n客户公司: %s\n授权邮箱: %s\n绑定方式: %s\n授权台数: %d\n签发日  : %s\n到期日  : %s\n版本    : %s\n",
-			p.ID, p.Display(), p.Email, bindDesc, p.Nodes, p.Issued, p.Expire, p.Edition)
+		fmt.Printf("许可编号: %s\n客户公司: %s\n授权邮箱: %s\n绑定方式: %s\n授权台数: %d\n签发日  : %s\n到期日  : %s\n版本    : %s（档位 %s）\n",
+			p.ID, p.Display(), p.Email, bindDesc, p.Nodes, p.Issued, p.Expire, p.Edition, p.Tier())
+		if len(p.Features) > 0 {
+			fmt.Printf("显式功能: %s\n", strings.Join(p.Features, ", "))
+		}
+		fmt.Printf("开启功能: %s\n", strings.Join(enabled, ", "))
 		fmt.Println("签名校验: 通过")
 		fmt.Println("──────────────────────────────────────────")
 		return

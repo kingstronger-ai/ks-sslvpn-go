@@ -18,6 +18,7 @@ import (
 	"sslvpn/internal/fw"
 	"sslvpn/internal/mail"
 	"sslvpn/internal/util"
+	"sslvpn/internal/version"
 	"sslvpn/internal/vpn"
 )
 
@@ -355,7 +356,7 @@ func SystemInfo(w http.ResponseWriter, r *http.Request) {
 func systemInfoMap() map[string]any {
 	mi, _ := os.Hostname()
 	m := map[string]any{
-		"version":         "1.0.0",
+		"version":         version.Version,
 		"hostname":        mi,
 		"sys_name":        db.GetSetting("sys_name"),
 		"now":             db.Now(),

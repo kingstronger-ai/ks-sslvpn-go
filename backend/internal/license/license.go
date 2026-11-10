@@ -43,18 +43,65 @@ const (
 	BindNone    = "none"    // 浮动许可：不绑定机器，仅限 1 台同时使用
 )
 
+// 版本档位（授权分档：社区版 / 专业版 / 企业版）
+const (
+	TierCommunity  = "community"  // 社区版（开源免费 / 试用）：核心 VPN
+	TierPro        = "pro"        // 专业版：在社区版基础上 + 高级功能
+	TierEnterprise = "enterprise" // 企业版：在专业版基础上 + 旗舰功能
+)
+
+// 功能键（用于后端按档位拦截）
+const (
+	FeatDomainRoute     = "domain_route"     // 域名分流
+	FeatSSO             = "sso"              // 三渠道扫码登录（SSO）
+	FeatCCD             = "ccd"              // CCD 高级配置
+	FeatLDAP            = "ldap"             // LDAP / AD 目录集成
+	FeatClientDownload  = "client_download"  // 桌面客户端分发与下载管控
+	FeatMultiInstance   = "multi_instance"   // 多实例 / 集群部署
+	FeatPrivateIssuance = "private_issuance" // 私有化许可签发与在线登记
+	FeatACMERenew       = "acme_auto_renew"  // 证书自动续签（ACME）
+)
+
+// featureTier 记录每个功能所需的最低档位
+var featureTier = map[string]string{
+	FeatDomainRoute:     TierPro,
+	FeatSSO:             TierPro,
+	FeatCCD:             TierPro,
+	FeatLDAP:            TierPro,
+	FeatClientDownload:  TierPro,
+	FeatMultiInstance:   TierEnterprise,
+	FeatPrivateIssuance: TierEnterprise,
+	FeatACMERenew:       TierEnterprise,
+}
+
+// tierRank 档位排序（数值越大档位越高）
+var tierRank = map[string]int{
+	TierCommunity:  0,
+	TierPro:        1,
+	TierEnterprise: 2,
+}
+
+// tierRankOf 返回档位排序值（未知档位按社区版处理）
+func tierRankOf(t string) int {
+	if v, ok := tierRank[t]; ok {
+		return v
+	}
+	return 0
+}
+
 // Payload 许可负载
 type Payload struct {
-	ID       string `json:"id,omitempty"` // 许可唯一编号（浮动许可用于在线登记）
-	Machine  string `json:"m,omitempty"`  // 机器码（BindMachine 时必填）
-	Customer string `json:"c,omitempty"`  // 客户名称（公司名）
-	Company  string `json:"co,omitempty"` // 公司名称（浮动许可必填）
-	Email    string `json:"u,omitempty"`  // 授权邮箱（浮动许可必填）
-	Bind     string `json:"b,omitempty"`  // 绑定模式：machine / none（空视为 machine）
-	Expire   string `json:"e"`            // 到期日 YYYY-MM-DD（含当日）
-	Issued   string `json:"i,omitempty"`  // 签发日
-	Edition  string `json:"ed,omitempty"` // 版本标识（可选，如 standard/pro）
-	Nodes    int    `json:"n,omitempty"`  // 授权台数上限（0=不限）
+	ID       string   `json:"id,omitempty"` // 许可唯一编号（浮动许可用于在线登记）
+	Machine  string   `json:"m,omitempty"`  // 机器码（BindMachine 时必填）
+	Customer string   `json:"c,omitempty"`  // 客户名称（公司名）
+	Company  string   `json:"co,omitempty"` // 公司名称（浮动许可必填）
+	Email    string   `json:"u,omitempty"`  // 授权邮箱（浮动许可必填）
+	Bind     string   `json:"b,omitempty"`  // 绑定模式：machine / none（空视为 machine）
+	Expire   string   `json:"e"`            // 到期日 YYYY-MM-DD（含当日）
+	Issued   string   `json:"i,omitempty"`  // 签发日
+	Edition  string   `json:"ed,omitempty"` // 版本标识（可选，如 community/pro/enterprise）
+	Nodes    int      `json:"n,omitempty"`  // 授权台数上限（0=不限）
+	Features []string `json:"ft,omitempty"` // 显式功能清单（可选；留空则按 Edition 推导）
 }
 
 // Unbound 是否为浮动许可（不绑定机器码）
@@ -70,27 +117,87 @@ func (p Payload) Display() string {
 	return p.Customer
 }
 
+// Tier 由版本标识推导档位（community / pro / enterprise）；未知按社区版。
+func (p Payload) Tier() string {
+	switch strings.ToLower(strings.TrimSpace(p.Edition)) {
+	case "enterprise", "ent", "e":
+		return TierEnterprise
+	case "pro", "p":
+		return TierPro
+	default:
+		return TierCommunity
+	}
+}
+
+// HasFeature 当前许可是否包含某功能（显式 Features 优先，否则按档位推导）。
+func (p Payload) HasFeature(key string) bool {
+	for _, f := range p.Features {
+		if strings.EqualFold(f, key) {
+			return true
+		}
+	}
+	need, ok := featureTier[key]
+	if !ok {
+		return true // 未登记的功能（核心功能）默认全档位可用，不受显式清单影响
+	}
+	if len(p.Features) > 0 {
+		// 显式清单已给出，且不含该键 → 明确不具备
+		return false
+	}
+	return tierRankOf(p.Tier()) >= tierRankOf(need)
+}
+
+// EnabledFeatures 返回当前许可实际开启的功能键列表（供前端 / 状态展示）。
+func (p Payload) EnabledFeatures() []string {
+	out := make([]string, 0, len(featureTier))
+	for k := range featureTier {
+		if p.HasFeature(k) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// RequiredTier 返回功能所需最低档位；未登记的功能返回空串（全档位可用）。
+func RequiredTier(key string) string { return featureTier[key] }
+
+// AllowFeature 判断当前授权（正式许可或试用）是否开启指定功能。
+// 内部走 Check() 的 30s 缓存，代价极低，可在每个请求中调用。
+func AllowFeature(key string) bool {
+	if featureTier[key] == "" {
+		return true // 未登记的功能默认全档位可用
+	}
+	for _, f := range Check().Features {
+		if strings.EqualFold(f, key) {
+			return true
+		}
+	}
+	return false
+}
+
 // Status 授权状态（前端展示用）
 type Status struct {
-	State       string `json:"state"`
-	Machine     string `json:"machine"`
-	Customer    string `json:"customer"`
-	Company     string `json:"company,omitempty"`
-	Email       string `json:"email,omitempty"`
-	Bind        string `json:"bind,omitempty"`         // machine / none
-	Unbound     bool   `json:"unbound"`                // 是否浮动许可（未绑定机器）
-	Nodes       int    `json:"nodes,omitempty"`        // 授权台数
-	LicID       string `json:"lic_id,omitempty"`       // 许可编号
-	LockMachine string `json:"lock_machine,omitempty"` // 浮动许可首次激活的机器码
-	LockTime    string `json:"lock_time,omitempty"`    // 浮动许可首次激活时间
-	Registry    bool   `json:"registry"`               // 是否启用了在线登记（硬约束）
-	Expire      string `json:"expire"`
-	DaysLeft    int    `json:"days_left"`
-	TrialDays   int    `json:"trial_days"`
-	TrialEnd    string `json:"trial_end"`
-	Edition     string `json:"edition"`
-	TokenErr    string `json:"token_error,omitempty"`
-	ServerTime  string `json:"server_time"`
+	State       string   `json:"state"`
+	Machine     string   `json:"machine"`
+	Customer    string   `json:"customer"`
+	Company     string   `json:"company,omitempty"`
+	Email       string   `json:"email,omitempty"`
+	Bind        string   `json:"bind,omitempty"`         // machine / none
+	Unbound     bool     `json:"unbound"`                // 是否浮动许可（未绑定机器）
+	Nodes       int      `json:"nodes,omitempty"`        // 授权台数
+	LicID       string   `json:"lic_id,omitempty"`       // 许可编号
+	LockMachine string   `json:"lock_machine,omitempty"` // 浮动许可首次激活的机器码
+	LockTime    string   `json:"lock_time,omitempty"`    // 浮动许可首次激活时间
+	Registry    bool     `json:"registry"`               // 是否启用了在线登记（硬约束）
+	Expire      string   `json:"expire"`
+	DaysLeft    int      `json:"days_left"`
+	TrialDays   int      `json:"trial_days"`
+	TrialEnd    string   `json:"trial_end"`
+	Edition     string   `json:"edition"`
+	Tier        string   `json:"tier"`               // 档位：community / pro / enterprise
+	Features    []string `json:"features,omitempty"` // 已开启功能键
+	TokenErr    string   `json:"token_error,omitempty"`
+	ServerTime  string   `json:"server_time"`
 }
 
 // Expired 是否处于未授权且试用过期状态
@@ -357,6 +464,8 @@ func compute() Status {
 			}
 			st.Expire = p.Expire
 			st.Edition = p.Edition
+			st.Tier = p.Tier()
+			st.Features = p.EnabledFeatures()
 			st.DaysLeft = int(time.Until(exp.Add(24*time.Hour)).Hours() / 24)
 			if st.DaysLeft < 0 {
 				st.DaysLeft = 0
@@ -373,9 +482,13 @@ func compute() Status {
 	if left <= 0 {
 		st.State = StateExpired
 		st.DaysLeft = 0
+		st.Tier = TierCommunity
+		st.Features = (&Payload{Edition: TierCommunity}).EnabledFeatures()
 		return st
 	}
 	st.State = StateTrial
+	st.Tier = TierCommunity
+	st.Features = (&Payload{Edition: TierCommunity}).EnabledFeatures()
 	// 向上取整到天：剩 0.3 天也算 1 天
 	st.DaysLeft = int((left + 24*time.Hour - time.Second) / (24 * time.Hour))
 	if st.DaysLeft < 1 {

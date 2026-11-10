@@ -32,6 +32,9 @@ docker compose up -d --build
 
 ## 授权与试用
 
+> **版本分档**：许可分为社区版 / 专业版 / 企业版，高级功能按档位拦截。试用期为社区版档位，
+> 签发方式与档位说明见本章末尾「版本档位」；各档价格与购买方式见文末「捐赠与支持」。
+
 - **默认试用 15 天**：首次启动写入试用起点（可用环境变量 `SSLVPN_TRIAL_DAYS` 调整）。
 - 试用到期且未激活许可时，除「授权管理」外的所有功能接口返回 `402`，登录仍可用，前端会自动
   跳到授权页。
@@ -65,11 +68,25 @@ docker compose up -d --build
 sslvpn license-registry -addr :8790 -secret 'your-secret' -file /var/lib/license-registry.json
 
 # 客户机（docker-compose.yml 的 environment 里加）
-#   SSLVPN_LICENSE_REGISTER=https://授权方IP:8790
+#   SSLVPN_LICENSE_REGISTER=http://授权方IP:8790   # 登记服务是明文 HTTP，跨公网请套 HTTPS 反代
 #   SSLVPN_LICENSE_SECRET=your-secret
 ```
 
-换机时在原机「解除激活」会同步释放席位；也可在登记服务侧 `POST /release {"id":"1"}` 强制回收。
+> **「同时仅限 1 台在用」的准确含义**：签发时 `-bind none` 默认 `-nodes 1`，但纯离线模式（不配
+> `SSLVPN_LICENSE_REGISTER`）只是**软约束**——客户端只在自己库里记首次激活的机器码，
+> 无法阻止把同一个许可串复制到另一台干净的机器上激活。要做**硬约束**，必须启用上面的在线登记服务：
+> 它按许可编号 `id` 占座，同一 `id` 被第二台机器激活时直接拒绝（`-nodes` 目前仅作展示/记录）。
+> 签发时不要漏掉自动生成的 `id`，否则登记服务会提示「浮动许可缺少许可编号」。
+>
+> 常用运维命令（授权方机器上执行）：
+> ```bash
+> # 查看当前占用
+> curl -H 'X-License-Secret: your-secret' http://127.0.0.1:8790/list
+> # 原机器已不在时强制回收席位（不要带 machine 字段，否则会被「只能由已激活机器解除」拒绝）
+> curl -X POST -H 'X-License-Secret: your-secret' -H 'Content-Type: application/json' \
+>      -d '{"id":"1"}' http://127.0.0.1:8790/release
+> ```
+> 换机时先在原机「解除激活」会自动释放席位；换许可（例如社区版换专业版）也建议先解除激活再粘贴新串。
 
 签发端构建（在开发机）：
 
@@ -78,6 +95,107 @@ cd backend && go build -o sslvpn ./cmd/sslvpn
 ```
 
 > 说明：授权拦截只作用于 Web/API 层，已建立的 OpenVPN 隧道与 `auth-verify` 认证不受影响。
+
+### 版本档位（社区版 / 专业版 / 企业版）
+
+许可负载中的 `ed`（Edition）决定档位；也可用 `ft`（Features）给出显式功能清单（优先级更高）。
+服务端按档位**硬拦截**高级功能接口，前端按 `/api/v1/license/info` 返回的 `tier` / `features` 同步隐藏无权菜单。
+
+| 档位 | `-edition` 值 | 可用高级功能 |
+| --- | --- | --- |
+| 社区版 | `community`（默认，不传即为该档） | 核心 VPN：用户管理、本地密码 + TOTP、基础路由 / iroute、防火墙、日志审计、备份恢复、SMTP、品牌自定义 |
+| 专业版 | `pro` | ＋域名分流、三渠道扫码登录（SSO）、CCD 高级配置、LDAP / AD 目录集成、桌面客户端分发与下载管控 |
+| 企业版 | `enterprise` | ＋多实例 / 集群部署、私有化许可签发与在线登记、证书自动续签（ACME） |
+
+功能键（`ft` 或 `-features`）：`domain_route` `sso` `ccd` `ldap` `client_download`（专业版），
+`multi_instance` `private_issuance` `acme_auto_renew`（企业版）。
+
+```bash
+# 专业版 / 企业版许可（不传 -edition 即社区版）
+./sslvpn license-gen -bind none -email 421381118@qq.com -company "某某科技有限公司" -expire 2030-12-31 -edition pro
+./sslvpn license-gen -bind none -email 421381118@qq.com -company "某某科技有限公司" -edition enterprise
+
+# 精确指定功能清单（逗号分隔，优先于档位推导）
+./sslvpn license-gen -bind none -email 421381118@qq.com -company "某某科技有限公司" -edition pro -features domain_route,sso
+
+# 自检：输出会显示档位与开启功能
+./sslvpn license-inspect -token '<许可串>'
+```
+
+> 未授权时高级接口返回应用层 `403`「XX 为专业版/企业版功能，当前授权档位未开启」。
+> 两个保护项：`/profile/account` 同时承载本地账号 / TOTP 客户端登录，**不按 LDAP 拦截**；
+> 既有实例的管理不受限，仅**新增实例**需要企业版档位。试用期为社区版，可完整体验核心 VPN。
+
+## 在线升级（检测 → 确认 → 自动备份 → 回滚）
+
+后台「系统设置 → 版本升级」提供版本检测与一键升级。设计上**容器内不持有宿主机 Docker 权限**：
+Web 端只负责检测版本、展示更新说明、记录用户确认与展示进度；真正的备份、替换、重建、回滚由宿主机上的
+`deploy/upgrade-agent.sh` 执行。两者通过数据卷内的 `request.json` / `status.ini` / `backups.txt` / `log.txt`
+通信，**不需要挂载 docker.sock，也不需要改动 docker-compose.yml 的卷配置**。
+
+### 一次性部署（每个服务器一次）
+
+```bash
+# ① 部署含本功能的版本包（顶层目录 sslvpn-go/，原地覆盖解压，目录名不能变）
+cd /opt && tar -xzf /opt/sslvpn-go/sslvpn-go-v1.2.0.tar.gz -C /opt
+cd /opt/sslvpn-go && docker compose up -d --build
+
+# ② 安装宿主机升级代理（systemd 常驻，自动拉起）
+bash deploy/install-upgrade-agent.sh
+
+# ③ 配置更新源：在 docker-compose.yml 的 environment 增加一行，然后重建容器
+#      - SSLVPN_UPDATE_URL=file:///var/lib/sslvpn/upgrade/version.json
+#    cd /opt/sslvpn-go && docker compose up -d
+#    （国内可把 version.json 放到 Gitee 仓库或自建站点，填 https:// 地址；
+#     例如 - SSLVPN_UPDATE_URL=https://gitee.com/KingStrongerGee/ssvpn/raw/main/version.json）
+
+# ④ 放置更新源与升级包
+cp deploy/version.json.example /opt/sslvpn-upgrade/version.json
+#    编辑 version.json：把 sha256 换成实际包的 sha256，package 指向包路径
+mkdir -p /opt/sslvpn-upgrade/packages
+cp sslvpn-go-v1.2.0.tar.gz /opt/sslvpn-upgrade/packages/
+```
+
+代理会每 5 秒把宿主机 `/opt/sslvpn-upgrade/version.json` 同步进容器，供 `file://` 更新源读取；
+升级包请放在 `/opt/sslvpn-upgrade/packages/`（不要放在 `/opt/sslvpn-go/` 内，回滚时该目录会被整体改名保留）。
+
+`version.json` 字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `version` | 目标版本号（语义版本，需大于当前版本） |
+| `released_at` / `notes` | 发布日期与更新说明，展示在检测卡片里 |
+| `package` | `http(s)://` 下载地址，或**宿主机上的包绝对路径**（推荐放 `packages/` 下） |
+| `sha256` | 包的 sha256（64 位小写十六进制），**必填**；校验不通过绝不解压 |
+| `min_version` | 本次升级要求的最低当前版本，低于它会被拒绝 |
+
+### 使用流程
+
+1. 「检查更新」→ 只读拉取 `version.json`，显示新版本、更新说明、包与 sha256。
+2. 点击「确认升级」→ 二次确认弹窗说明会中断服务、会自动备份、可回滚。
+3. 代理按阶段执行并回报进度：**备份 → 取包 → 校验 → 覆盖 → 重建 → 健康检查**。
+4. 构建或健康检查失败时**自动回滚**；成功后也可在备份列表点「回滚」手动回退。
+
+### 备份与回滚
+
+每次升级前代理会在 `/opt/sslvpn-upgrade/backups/<备份ID>/` 生成完整快照：源码 tar、`docker-compose.yml`
+（含端口/环境变量等自定义）、两个命名卷 `sslvpn-data` / `sslvpn-openvpn` 的 tar、当前镜像 tag。
+升级解压后**保留现网 compose**，避免覆盖自定义配置；新包模板另存为 `compose.new.yml` 供对比。
+
+回滚会恢复源码、配置与两个卷，并用备份时的镜像直接启动（无需联网重新构建）；升级失败的现场目录
+保留为 `/opt/sslvpn-go.failed-<备份ID>` 便于排查。**回滚会把数据卷恢复到升级前，升级后新增的数据会丢失**。
+
+代理任何情况下都不会执行 `docker compose down -v` 或删除数据卷；升级/回滚都必须保持目录名
+`/opt/sslvpn-go` 不变，否则 compose 项目名变化会挂到空卷上（看起来像数据全部丢失）。
+
+### 安全与手工兜底
+
+- `POST /upgrade/apply` 只接受 `confirm` 字段，**下载地址与 sha256 一律由服务端从更新源重新读取**，
+  管理端请求里夹带的 `package` 不会被采信，避免注入任意 URL 让宿主机代理下载执行。
+- 所有升级接口需要管理员登录；代理与容器之间只传纯文本状态与 JSON 请求，不开放任何容器外执行接口。
+- 未部署代理时页面会提示「代理未在线」，此时仍可按传统方式手工升级：备份两个卷 → 在 `/opt` 下
+  `tar -xzf 新包 -C /opt` → `docker compose up -d --build` → `curl -k https://127.0.0.1:58443/healthz`。
+- 升级会重建容器，VPN 与管理页面中断约 1–2 分钟，建议在维护窗口操作。
 
 ## 架构
 
@@ -560,12 +678,72 @@ docker run --rm -it -v "$(docker volume ls --format '{{.Name}}' | grep sslvpn-da
      --exclude='deploy/keys/license-private.pem' \
      --exclude='deploy/keys/*.pem.bak' \
      --exclude='backend/sslvpn' --exclude='backend/sslvpn.exe' \
-     Dockerfile README.md backend deploy docker-compose.yml
-   ```
+  Dockerfile README.md backend deploy docs docker-compose.yml
+  ```
 
    打包后自查，下列命令应**无输出**：
    `tar -tzf sslvpn-final.tar.gz | grep -E 'license-private|private.*\.pem|nas\.yml'`。
    NAS / 群晖 / Unraid 的绑定目录模板由部署文档站单独提供，不随包分发。
+
+## 捐赠与支持
+
+KSVPN 以源码公开（Source Available）方式发布，长期维护需要持续投入。如果你的团队从中受益，欢迎扫码支持作者：
+社区版为基础档，专业版与企业版用于换取更完善的授权、优先响应与定制支持。
+完整在线版本见部署文档站「捐赠与支持」页面（含在线收款码与最新档位说明）。
+
+### 版本与价格
+
+| 档位 | 价格 | 包含功能 |
+| --- | --- | --- |
+| **社区版** Community | **¥39.9** / 基础授权 | 单实例核心 VPN：用户管理、本地密码 + TOTP；基础 push route / iroute、防火墙、日志审计；备份恢复、SMTP 邮件、品牌自定义；源码公开可审阅，生产使用需取得基础授权，含社区支持 |
+| **专业版** Pro | **¥199** / 永久授权 | 包含社区版全部功能；域名分流、三渠道扫码登录（SSO）；CCD 高级配置、LDAP / AD 目录集成；官方桌面客户端分发与下载管控 |
+| **企业版** Enterprise | **联系我** | 包含专业版全部功能；多实例 / 集群部署、私有化许可签发与在线登记；证书自动续签（ACME）、专属 SLA 与定制开发；合规、审计与培训支持 |
+
+> 档位由许可的 `ed` / `ft` 字段决定，服务端按档位拦截高级接口，前端同步隐藏无权菜单
+> （详见上文「授权与试用 → 版本档位」）。
+
+### 扫码支持
+
+可直接扫码付款，支持微信与支付宝；备注「专业版」可换取授权。
+
+<table>
+  <tr>
+    <td align="center"><b>微信支付</b><br><img src="docs/pay/pay-wechat.jpg" width="220" alt="微信收款码"><br>打开微信「扫一扫」支持作者</td>
+    <td align="center"><b>支付宝</b><br><img src="docs/pay/pay-alipay.jpg" width="220" alt="支付宝收款码"><br>打开支付宝「扫一扫」支持作者</td>
+  </tr>
+</table>
+
+### 联系方式
+
+| 渠道 | 账号 |
+| --- | --- |
+| QQ | `421381118` |
+| 微信 | `WayneMiss` |
+| 邮箱 | [421381118@qq.com](mailto:421381118@qq.com?subject=KSVPN%20授权咨询) |
+| 官方 QQ 交流群 | `KS-SSLVPN`（群号 **897907129**，在 QQ 中搜索群号即可申请加入） |
+
+### 下载与源码
+
+国内用户建议从 Gitee 获取（无需代理、速度快），GitHub 为同步镜像，两端内容一致。
+
+- [Gitee Releases 下载发布版](https://gitee.com/KingStrongerGee/ssvpn/releases)
+- [Gitee 查看源码与文档](https://gitee.com/KingStrongerGee/ssvpn)
+- [GitHub Releases（备用）](https://github.com/kingstronger-ai/ssvpn/releases)
+- [GitHub 源码（备用）](https://github.com/kingstronger-ai/ssvpn)
+
+```bash
+# 国内（推荐）
+git clone https://gitee.com/KingStrongerGee/ssvpn.git sslvpn-go
+cd sslvpn-go && docker compose up -d --build
+
+# 或 GitHub
+git clone https://github.com/kingstronger-ai/ssvpn.git sslvpn-go
+```
+
+> 克隆时务必把目录命名为 `sslvpn-go`：目录名决定 Docker Compose 项目名，进而决定挂载哪一组
+> 数据卷；改名会挂到空卷，看起来像「数据全丢了」。
+> Git 仓库不含 `deploy/downloads/` 下的桌面客户端安装包（体积较大，已被 `.gitignore` 排除），
+> 完整交付请使用 Releases 的 tar.gz / zip 离线包，或在后台上传客户端包（会落入数据卷，重建不丢）。
 
 ## 开发
 

@@ -245,13 +245,13 @@ const NAV = [
   { title: "运行监控", pages: [["dash", "◎", "运行概览"]] },
   { title: "用户与权限", pages: [["users", "👤", "用户账号"], ["ccd", "⚙", "用户策略"], ["ldap", "🔑", "LDAP 目录"], ["online", "📶", "在线会话"]] },
   { title: "连接管理", pages: [["groups", "🗂", "用户分组"], ["services", "🖧", "连接配置"], ["domain", "🌐", "域名分流"]] },
-  { title: "系统设置", pages: [["backup", "💾", "备份恢复"], ["clientdl", "⬇", "客户端下载"], ["smtp", "✉", "邮件服务"], ["sso", "🪪", "扫码登录"], ["sys", "☑", "全局设置"], ["fw", "🧱", "访问控制"], ["admins", "🛡", "管理员"], ["license", "🔐", "许可管理"], ["cert", "🔒", "证书管理"]] },
+  { title: "系统设置", pages: [["backup", "💾", "备份恢复"], ["clientdl", "⬇", "客户端下载"], ["smtp", "✉", "邮件服务"], ["sso", "🪪", "扫码登录"], ["sys", "☑", "全局设置"], ["fw", "🧱", "访问控制"], ["admins", "🛡", "管理员"], ["license", "🔐", "许可管理"], ["cert", "🔒", "证书管理"], ["upgrade", "⬆", "版本升级"]] },
   { title: "日志审计", pages: [["authlog", "📋", "认证日志"], ["syslog", "📄", "系统日志"]] },
 ];
 const ROUTES = { dash: pageDash, users: pageUsers, ccd: pageCcd, ldap: pageLdap, online: pageOnline,
   groups: pageGroups, services: pageServices, backup: pageBackup, smtp: pageSmtp, sys: pageSys,
   fw: pageFW, authlog: pageAuthLog, syslog: pageSysLog, license: pageLicense, admins: pageAdmins, cert: pageCert,
-  sso: pageFeishu, domain: pageDomain, clientdl: pageClientDownload };
+  sso: pageFeishu, domain: pageDomain, clientdl: pageClientDownload, upgrade: pageUpgrade };
 
 function renderLayout(page) {
   $app.innerHTML = `
@@ -971,7 +971,7 @@ async function pageServices(main) {
   main.innerHTML = `<div class="card">
     <div class="topbar"><h3 style="margin:0">🖧 连接配置</h3>
       <div class="inline">
-        <button class="primary" onclick="svcAddModal()">＋ 添加服务</button>
+        <button class="primary" data-feature="multi_instance" onclick="svcAddModal()">＋ 添加服务</button>
         <button class="ghost" onclick="enter('services')">⟳ 刷新</button>
       </div></div>
     <div id="svcTable">${loading}</div></div>`;
@@ -1354,13 +1354,18 @@ async function pageCert(main) {
     </div>
   </div>`;
   // 自动续签面板（独立请求，失败不影响上面的手工上传区）
-  main.insertAdjacentHTML("beforeend", `<div class="card wide" id="certAutoCard" style="margin-top:16px"><h3>🔄 证书自动续签</h3><div class="muted" style="padding:10px 0">加载中…</div></div>`);
+  main.insertAdjacentHTML("beforeend", `<div class="card wide" id="certAutoCard" data-feature="acme_auto_renew" data-feature-mode="replace" data-feature-title="证书自动续签" style="margin-top:16px"><h3>🔄 证书自动续签</h3><div class="muted" style="padding:10px 0">加载中…</div></div>`);
   renderCertAuto();
 }
 
 async function renderCertAuto() {
   const box = document.getElementById("certAutoCard");
   if (!box) return;
+  // 企业版功能：未授权时直接渲染锁定提示，避免异步请求把提示覆盖回表单
+  if (window.tierAllow && !window.tierAllow("acme_auto_renew")) {
+    box.innerHTML = window.tierLockBox("acme_auto_renew", "证书自动续签");
+    return;
+  }
   let d = {};
   try { d = (await api("/cert/auto/get")).data || {}; } catch (e) { }
   const st = d.status || {};
@@ -2164,6 +2169,130 @@ async function pageSysLog(main) {
   document.getElementById("sysLogBox").innerHTML = rows ? `<table>
     <tr><th>账户/邮箱</th><th>类型</th><th>详情</th><th>IP</th><th>操作记录日期时间</th></tr>${rows}</table>`
     : `<p class="muted" style="text-align:center;padding:30px 0">暂无日志</p>`;
+}
+
+/* ================= 版本与在线升级 ================= */
+const UPGRADE_PHASES = {
+  idle: ["空闲", "off"], pending: ["等待代理处理", "blue"],
+  backing_up: ["备份源码 / 配置 / 数据卷", "blue"], downloading: ["下载升级包", "blue"],
+  verifying: ["校验升级包", "blue"], extracting: ["覆盖源码", "blue"],
+  building: ["重建镜像并启动", "blue"], healthcheck: ["健康检查", "blue"],
+  rolling_back: ["回滚中", "blue"], done: ["完成", "ok"], failed: ["失败", "off"]
+};
+let upgradeTimer = null;
+function upgradeStopPoll() { if (upgradeTimer) { clearInterval(upgradeTimer); upgradeTimer = null; } }
+function upgradeStartPoll() {
+  upgradeStopPoll();
+  upgradeTimer = setInterval(() => {
+    if (!document.getElementById("upStatus")) { upgradeStopPoll(); return; }
+    upgradeStatus().catch(() => {});
+  }, 3000);
+}
+
+async function pageUpgrade(main) {
+  main.innerHTML = `<div class="card">
+    <div class="topbar"><h3 style="margin:0">⬆ 版本与在线升级</h3>
+      <button class="ghost" onclick="enter('upgrade')">⟳ 刷新</button></div>
+    <div id="upVer">${loading}</div></div>
+  <div class="card" style="margin-top:16px"><h3>🔍 检查更新</h3>
+    <button class="primary" id="upCheckBtn" onclick="upgradeCheck()">检查更新</button>
+    <div id="upCheckResult" style="margin-top:12px"><div class="muted">点击「检查更新」从配置的更新源读取版本信息（只读，不会改动系统）。</div></div></div>
+  <div class="card wide" style="margin-top:16px"><h3>📦 升级进度与备份</h3>
+    <div id="upStatus">${loading}</div>
+    <h3 style="margin-top:18px">升级前自动备份</h3>
+    <div id="upBackups">${loading}</div>
+    <h3 style="margin-top:18px">执行日志</h3>
+    <pre id="upLog" style="max-height:220px;overflow:auto;background:var(--border, #eef1f4);padding:10px;border-radius:6px;font-size:12px;line-height:1.6;white-space:pre-wrap">（暂无日志）</pre>
+  </div>`;
+  await Promise.all([upgradeVersion(), upgradeStatus()]);
+  upgradeStartPoll();
+}
+
+async function upgradeVersion() {
+  const el = document.getElementById("upVer");
+  if (!el) return;
+  const r = await api("/upgrade/version");
+  if (r.code !== 1) { el.innerHTML = errBox(r.msg); return; }
+  const d = r.data;
+  el.innerHTML = `<div class="inline" style="gap:28px;flex-wrap:wrap;align-items:flex-start">
+      <div><div class="muted">当前版本</div><div style="font-size:22px;font-weight:700;color:var(--primary)">${esc(d.version)}</div></div>
+      <div><div class="muted">升级代理</div><div>${d.agent_online ? '<span class="badge ok">在线</span>' : '<span class="badge off">离线</span>'}</div></div>
+      <div><div class="muted">更新源</div><div class="muted" style="font-size:12px">${esc(d.update_url || "未配置")}</div></div>
+    </div>
+    ${d.agent_online ? "" : '<div class="err-box" style="margin-top:12px">⚠ 宿主机升级代理未在线：请在服务器执行 <code>bash deploy/install-upgrade-agent.sh</code>，并配置 <code>SSLVPN_UPDATE_URL</code> 后重建容器。</div>'}
+    ${d.update_url ? "" : '<div class="err-box" style="margin-top:12px">⚠ 未配置更新源：在 docker-compose.yml 的 environment 增加 <code>SSLVPN_UPDATE_URL=file:///var/lib/sslvpn/upgrade/version.json</code>（或指向 http(s) 的 version.json）后重建容器。</div>'}`;
+}
+
+async function upgradeCheck() {
+  const box = document.getElementById("upCheckResult");
+  const btn = document.getElementById("upCheckBtn");
+  if (btn) btn.disabled = true;
+  box.innerHTML = loading;
+  try {
+    const r = await api("/upgrade/check");
+    if (r.code !== 1) { box.innerHTML = errBox(r.msg); return; }
+    const d = r.data;
+    if (!d.has_update) {
+      box.innerHTML = `<div class="tip-banner">✅ 当前已是最新版本 <b>${esc(d.current)}</b>（更新源版本 ${esc(d.latest)}）。</div>`;
+      return;
+    }
+    box.innerHTML = `<div class="tip-banner">发现新版本 <b style="font-size:16px;color:var(--primary)">${esc(d.latest)}</b>（当前 ${esc(d.current)}）<span class="muted"> · 发布 ${esc(d.released_at || "-")}</span></div>
+      <div class="muted" style="line-height:1.8;margin:10px 0">${esc(d.notes || "无更新说明")}</div>
+      <div class="muted" style="font-size:12px">包：${esc(d.package || "-")}<br>sha256：${esc((d.sha256 || "").slice(0, 16))}…</div>
+      ${d.compatible ? "" : `<div class="err-box">⚠ 当前版本低于最低要求 ${esc(d.min_version)}，请先逐版本升级。</div>`}
+      ${d.agent_online ? "" : '<div class="err-box">⚠ 升级代理离线，无法执行升级。</div>'}
+      <div style="margin-top:12px"><button class="primary" data-ver="${esc(d.latest)}" onclick="upgradeApply(this)" ${d.ready ? "" : "disabled"}>⬆ 确认升级到 ${esc(d.latest)}</button></div>
+      ${d.ready ? "" : '<div class="muted" style="font-size:12px;margin-top:6px">需满足：代理在线、package 与 sha256 合法、版本兼容。</div>'}`;
+  } finally { if (btn) btn.disabled = false; }
+}
+
+function upgradeApply(btn) {
+  const ver = btn.dataset.ver || "";
+  confirmModal("确认升级到 " + esc(ver), `
+    <b>升级会先自动完整备份</b>：源码、docker-compose.yml 配置、两个数据卷与当前镜像；备份完成后才会替换并重建。<br><br>
+    ⚠ 重建期间 <b>VPN 与管理页面会中断约 1–2 分钟</b>；若构建或健康检查失败，代理会<b>自动回滚</b>到升级前状态；升级成功后也可在下方备份列表手动回滚。<br><br>
+    回滚会把数据卷恢复到升级前，<b>升级后新产生的数据会丢失</b>。`, async () => {
+    const r = await api("/upgrade/apply", { body: { confirm: true } });
+    toast(r.msg, r.code === 1);
+    await upgradeStatus();
+  });
+}
+
+async function upgradeStatus() {
+  const el = document.getElementById("upStatus");
+  if (!el) return;
+  const [r, l] = await Promise.all([
+    api("/upgrade/status"),
+    api("/upgrade/log").catch(() => ({ data: { log: "" } }))
+  ]);
+  if (r.code !== 1) { el.innerHTML = errBox(r.msg); return; }
+  const d = r.data, ph = UPGRADE_PHASES[d.phase] || ["未知", "off"];
+  const p = Math.max(0, Math.min(100, d.progress || 0));
+  el.innerHTML = `<div class="inline"><span class="badge ${ph[1]}">${ph[0]}</span>
+      <b>${esc(d.message || "-")}</b><span class="muted">${p}%</span></div>
+    <div style="background:var(--border, #e5e7eb);height:8px;border-radius:4px;margin:10px 0">
+      <div style="width:${p}%;background:var(--primary);height:8px;border-radius:4px;transition:width .3s"></div></div>
+    ${d.result_version ? `<div class="muted">结果版本：<b>${esc(d.result_version)}</b></div>` : ""}
+    <div class="muted" style="font-size:12px;margin-top:6px">代理心跳：${esc(d.heartbeat || "-")} ${d.agent_online ? "· 在线" : "· 离线"}</div>`;
+  const bk = document.getElementById("upBackups");
+  if (bk) {
+    const list = d.backups || [];
+    bk.innerHTML = list.length ? `<table><tr><th>备份 ID</th><th>时间</th><th>升级前版本</th><th>大小</th><th style="width:110px">操作</th></tr>
+      ${list.map(b => `<tr><td>${esc(b.id)}</td><td>${esc(b.time)}</td><td>${esc(b.version)}</td><td>${esc(b.size)}</td>
+        <td><a href="javascript:;" class="lk r" data-id="${esc(b.id)}" data-ver="${esc(b.version)}" onclick="upgradeRollback(this)">↩ 回滚</a></td></tr>`).join("")}</table>`
+      : '<div class="muted" style="font-size:12px">尚无备份。每次升级前代理都会自动生成一份。</div>';
+  }
+  const lg = document.getElementById("upLog");
+  if (lg) { lg.textContent = (l.data && l.data.log) || "（暂无日志）"; lg.scrollTop = lg.scrollHeight; }
+}
+
+function upgradeRollback(a) {
+  const id = a.dataset.id, ver = a.dataset.ver;
+  confirmModal("确认回滚", `将把源码、配置与两个数据卷恢复到 <b>${esc(ver)}</b> 升级前的状态（备份 <b>${esc(id)}</b>）。<br><br>⚠ 回滚期间服务会中断，且<b>升级后新增的数据会丢失</b>。`, async () => {
+    const r = await api("/upgrade/rollback", { body: { backup_id: id, confirm: true } });
+    toast(r.msg, r.code === 1);
+    await upgradeStatus();
+  });
 }
 
 /* ================= 启动 ================= */
