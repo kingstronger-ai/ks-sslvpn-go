@@ -101,6 +101,7 @@ type Payload struct {
 	Issued   string   `json:"i,omitempty"`  // 签发日
 	Edition  string   `json:"ed,omitempty"` // 版本标识（可选，如 community/pro/enterprise）
 	Nodes    int      `json:"n,omitempty"`  // 授权台数上限（0=不限）
+	MaxUsers int      `json:"mu,omitempty"` // 授权 VPN 用户数上限（0 或字段缺省=不限制，兼容旧许可串）
 	Features []string `json:"ft,omitempty"` // 显式功能清单（可选；留空则按 Edition 推导）
 }
 
@@ -196,12 +197,72 @@ type Status struct {
 	Edition     string   `json:"edition"`
 	Tier        string   `json:"tier"`               // 档位：community / pro / enterprise
 	Features    []string `json:"features,omitempty"` // 已开启功能键
+	MaxUsers    int      `json:"max_users"`          // 许可授权的 VPN 用户数上限（0=不限制）
+	UserCount   int      `json:"user_count"`         // 当前账号总数（含禁用账号）
+	UserLeft    int      `json:"user_left"`          // 剩余可新增用户数（-1=不限制）
 	TokenErr    string   `json:"token_error,omitempty"`
 	ServerTime  string   `json:"server_time"`
 }
 
 // Expired 是否处于未授权且试用过期状态
 func (s Status) Expired() bool { return s.State == StateExpired }
+
+// ---------------- 用户数配额 ----------------
+// 许可负载里的 mu（MaxUsers）决定 VPN 账号总数上限；
+// 不传或为 0 表示不限制，旧许可串没有该字段，同样按不限制处理。
+// 统计口径：account 表全部账号（含禁用账号），避免通过禁用/启用绕过配额；
+// 管理员账号（admin 表）不计入。
+
+// userCount 实时统计 VPN 账号总数；DB 未初始化时返回 0（便于单测）。
+func userCount() int {
+	if db.DB == nil {
+		return 0
+	}
+	var n int
+	if err := db.DB.QueryRow(`SELECT COUNT(*) FROM account`).Scan(&n); err != nil {
+		return 0
+	}
+	return n
+}
+
+// UserQuota 返回 (上限, 已用, 剩余)。上限<=0 表示不限制，此时剩余返回 -1。
+// 上限取自 Check() 的 30s 缓存，账号数每次实时查库，保证创建账号时不会被缓存放宽。
+func UserQuota() (limit, used, left int) {
+	limit = Check().MaxUsers
+	used = userCount()
+	if limit <= 0 {
+		return 0, used, -1
+	}
+	left = limit - used
+	if left < 0 {
+		left = 0
+	}
+	return limit, used, left
+}
+
+// quotaAllowed 纯逻辑：limit<=0 表示不限制，否则已用+新增不得越界。
+func quotaAllowed(limit, used, n int) bool {
+	return limit <= 0 || used+n <= limit
+}
+
+// CanAddUsers 判断再新增 n 个 VPN 账号是否仍在许可用户数上限内。
+// 返回的错误文案可直接下发给前端（HTTP 403）。
+func CanAddUsers(n int) error {
+	if n <= 0 {
+		return nil
+	}
+	limit, used, _ := UserQuota()
+	if !quotaAllowed(limit, used, n) {
+		return fmt.Errorf("当前许可最多允许 %d 个 VPN 用户，已有 %d 个，无法再新增 %d 个；请删除闲置账号或联系授权方更换更大用户数的许可", limit, used, n)
+	}
+	return nil
+}
+
+// RefreshUserUsage 用实时账号数覆盖状态里的用量字段（供 /license/info 使用）。
+func RefreshUserUsage(s *Status) {
+	limit, used, left := UserQuota()
+	s.MaxUsers, s.UserCount, s.UserLeft = limit, used, left
+}
 
 // ---------------- 机器码 ----------------
 
@@ -444,6 +505,8 @@ func compute() Status {
 		TrialEnd:   trialEnd.Format("2006-01-02 15:04"),
 		ServerTime: time.Now().Format("2006-01-02 15:04:05"),
 		Registry:   registryEnabled(),
+		UserCount:  userCount(),
+		UserLeft:   -1, // 默认不限制；许可带 mu 时在下方重算
 	}
 
 	// 1) 优先看正式许可
@@ -466,6 +529,13 @@ func compute() Status {
 			st.Edition = p.Edition
 			st.Tier = p.Tier()
 			st.Features = p.EnabledFeatures()
+			st.MaxUsers = p.MaxUsers
+			if st.MaxUsers > 0 {
+				st.UserLeft = st.MaxUsers - st.UserCount
+				if st.UserLeft < 0 {
+					st.UserLeft = 0
+				}
+			}
 			st.DaysLeft = int(time.Until(exp.Add(24*time.Hour)).Hours() / 24)
 			if st.DaysLeft < 0 {
 				st.DaysLeft = 0

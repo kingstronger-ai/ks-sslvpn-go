@@ -10,8 +10,11 @@ import (
 )
 
 // LicenseInfo 当前授权状态（公开给登录后的任何角色，授权过期时也要能打开）
+// 用户配额按实时账号数覆盖，避免 Check() 的 30s 缓存让页面显示的用量滞后。
 func LicenseInfo(w http.ResponseWriter, r *http.Request) {
-	util.OK(w, license.Check())
+	st := license.Check()
+	license.RefreshUserUsage(&st)
+	util.OK(w, st)
 }
 
 // LicenseActivate 激活许可串

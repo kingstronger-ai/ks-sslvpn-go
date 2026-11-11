@@ -52,6 +52,14 @@ func dataDir() string {
 	return defaultDataDir
 }
 
+// maxUsersDesc 许可里 VPN 用户数上限的中文展示；0 或负值表示不限制。
+func maxUsersDesc(n int) string {
+	if n <= 0 {
+		return "不限制"
+	}
+	return fmt.Sprintf("%d 人", n)
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
@@ -104,6 +112,7 @@ func main() {
 		edition := fs.String("edition", "community", "授权档位：community=社区版 / pro=专业版 / enterprise=企业版")
 		features := fs.String("features", "", "显式功能清单（逗号分隔，留空按档位自动推导）：domain_route,sso,ccd,ldap,client_download,multi_instance,private_issuance,acme_auto_renew")
 		nodes := fs.Int("nodes", 0, "授权台数上限（浮动许可默认 1，0 为不限）")
+		maxUsers := fs.Int("max-users", 0, "授权 VPN 用户数上限（0 或留空 = 不限制用户数）")
 		_ = fs.Parse(os.Args[2:])
 
 		mode := strings.ToLower(strings.TrimSpace(*bind))
@@ -115,6 +124,10 @@ func main() {
 			name = strings.TrimSpace(*customer)
 		}
 		mail := strings.TrimSpace(*email)
+		if *maxUsers < 0 {
+			fmt.Println("错误：-max-users 不能为负数（0 或留空 = 不限制用户数）")
+			os.Exit(1)
+		}
 
 		if mode == license.BindMachine {
 			if license.Normalize(*machine) == "" {
@@ -176,7 +189,8 @@ func main() {
 		}
 		p := license.Payload{
 			ID: *id, Bind: mode, Machine: *machine, Customer: name, Company: name,
-			Email: mail, Expire: exp, Edition: *edition, Nodes: *nodes, Features: feats,
+			Email: mail, Expire: exp, Edition: *edition, Nodes: *nodes,
+			MaxUsers: *maxUsers, Features: feats,
 		}
 		token, err := license.Sign(p, priv)
 		if err != nil {
@@ -190,12 +204,15 @@ func main() {
 		enabled := p.EnabledFeatures()
 		sort.Strings(enabled)
 		fmt.Println("──────────────────────────────────────────")
-		fmt.Printf("许可编号: %s\n客户公司: %s\n授权邮箱: %s\n绑定方式: %s\n到期日  : %s\n版本    : %s（档位 %s）\n",
-			*id, name, mail, bindDesc, exp, *edition, p.Tier())
+		fmt.Printf("许可编号: %s\n客户公司: %s\n授权邮箱: %s\n绑定方式: %s\n到期日  : %s\n版本    : %s（档位 %s）\n用户上限: %s\n",
+			*id, name, mail, bindDesc, exp, *edition, p.Tier(), maxUsersDesc(*maxUsers))
 		if len(feats) > 0 {
 			fmt.Printf("显式功能: %s\n", strings.Join(feats, ", "))
 		}
 		fmt.Printf("开启功能: %s\n", strings.Join(enabled, ", "))
+		if *maxUsers > 0 {
+			fmt.Printf("用户数限制: 最多创建 %d 个 VPN 账号（含禁用账号），达到上限后新增 / 批量导入 / 自助注册 / LDAP 同步都会被拒绝\n", *maxUsers)
+		}
 		fmt.Println("──────────────────────────────────────────")
 		fmt.Println("许可串（复制整行发给客户，粘贴到「授权管理 → 激活许可」）：")
 		fmt.Println(token)
@@ -235,8 +252,8 @@ func main() {
 		enabled := p.EnabledFeatures()
 		sort.Strings(enabled)
 		fmt.Println("──────────────────────────────────────────")
-		fmt.Printf("许可编号: %s\n客户公司: %s\n授权邮箱: %s\n绑定方式: %s\n授权台数: %d\n签发日  : %s\n到期日  : %s\n版本    : %s（档位 %s）\n",
-			p.ID, p.Display(), p.Email, bindDesc, p.Nodes, p.Issued, p.Expire, p.Edition, p.Tier())
+		fmt.Printf("许可编号: %s\n客户公司: %s\n授权邮箱: %s\n绑定方式: %s\n授权台数: %d\n签发日  : %s\n到期日  : %s\n版本    : %s（档位 %s）\n用户上限: %s\n",
+			p.ID, p.Display(), p.Email, bindDesc, p.Nodes, p.Issued, p.Expire, p.Edition, p.Tier(), maxUsersDesc(p.MaxUsers))
 		if len(p.Features) > 0 {
 			fmt.Printf("显式功能: %s\n", strings.Join(p.Features, ", "))
 		}

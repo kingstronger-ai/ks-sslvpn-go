@@ -387,16 +387,30 @@ async function pageDash(main) {
 /* ================= 用户配置 ================= */
 let groupMap = {};
 async function pageUsers(main) {
-  const g = await api("/group/list");
+  const [g, licR] = await Promise.all([
+    api("/group/list"),
+    api("/license/info").catch(() => ({ data: {} }))
+  ]);
   groupMap = {}; (g.data.list || []).forEach(x => groupMap[x.id] = x.name);
+  const q = licR.data || {};
+  const limited = Number(q.max_users) > 0;
+  const used = Number(q.user_count || 0);
+  const left = Number(q.user_left || 0);
+  const full = limited && left <= 0;
+  const quotaBar = `<div class="tip-banner" style="font-size:13px;background:${full ? "#fef0f0" : "#f4f4f5"};border-color:${full ? "#fde2e2" : "#e9e9eb"};color:${full ? "#f56c6c" : "#606266"}">
+    ${limited
+      ? `🔒 授权用户数上限 <b>${esc(String(q.max_users))}</b> 人　·　已用 <b>${used}</b> 人　·　剩余 <b>${left}</b> 人${full ? "　⚠ 已达上限：新增 / 批量导入 / 自助注册 / LDAP 同步都会被拒绝，删除闲置账号或联系授权方更换更大用户数的许可后可继续" : ""}`
+      : `VPN 账号共 <b>${used}</b> 个　·　当前许可未限制用户数`}
+  </div>`;
   const kw = fv("uKw");
   main.innerHTML = `<div class="card">
     <div class="topbar"><h3 style="margin:0">👤 VPN 用户列表</h3>
       <div class="inline">
-        <button class="primary" onclick="userAddModal()">＋ 添加用户</button>
+        <button class="primary" ${full ? 'disabled style="opacity:.55;cursor:not-allowed" title="已达授权用户数上限"' : 'onclick="userAddModal()"'}>＋ 添加用户</button>
         <button class="ghost" onclick="window.open(API_BASE + '/account/exportDatabase')">📤 导出用户数据表格</button>
         <button class="ghost" onclick="enter('users')">⟳ 刷新</button>
       </div></div>
+    ${quotaBar}
     <div class="inline" style="margin-bottom:12px">
       <input id="uKw" placeholder="请输入 VPN 用户名" value="${esc(kw)}" style="width:220px"
         onkeydown="if(event.key==='Enter')enter('users')">
@@ -886,7 +900,8 @@ async function ldapDoImport(all) {
   if (!usernames.length) return toast("请先勾选要导入的用户", false);
   const r = await api("/ldap/import", { body: { usernames, group_id: +fv("lsGrp") || 0 } });
   if (r.code !== 1) return toast(r.msg, false);
-  toast(`导入完成：新增 ${r.data.added}，跳过 ${r.data.skipped}`);
+  const quotaFull = Number(r.data.quota_full || 0);
+  toast(`导入完成：新增 ${r.data.added}，跳过 ${r.data.skipped}${quotaFull ? `，${quotaFull} 人因授权用户数上限被拒绝` : ""}`, quotaFull === 0);
   closeModal("mLdapSync");
   enter("users");
 }
@@ -1941,6 +1956,22 @@ async function pageLicense(main) {
   const map = { licensed: ["ok", "已授权"], trial: ["blue", "试用中"], expired: ["off", "未授权"] };
   const [cls, txt] = map[s.state] || ["gray", s.state || "未知"];
   const isLic = s.state === "licensed";
+  const TIER_NAME = { community: "社区版", pro: "专业版", enterprise: "企业版" };
+  const FEATURE_NAME = {
+    domain_route: "域名分流", sso: "扫码登录（SSO）", ccd: "CCD 高级配置",
+    ldap: "LDAP / AD 目录集成", client_download: "客户端分发与下载管控",
+    multi_instance: "多实例 / 集群部署", private_issuance: "私有化签发与在线登记",
+    acme_auto_renew: "证书自动续签（ACME）"
+  };
+  const tierName = TIER_NAME[s.tier] || (isLic ? (s.edition || "社区版") : "社区版");
+  const featTags = (s.features || []).map(k =>
+    '<span class="badge blue" style="font-size:12px;padding:2px 8px;margin:2px 4px 2px 0;display:inline-block">' + esc(FEATURE_NAME[k] || k) + '</span>').join("");
+  const qLimited = Number(s.max_users) > 0;
+  const qUsed = Number(s.user_count || 0);
+  const qLeft = Number(s.user_left ?? -1);
+  const quotaCell = qLimited
+    ? `<b style="color:var(--primary)">${esc(String(s.max_users))} 人</b>　已用 <b>${qUsed}</b> 人，剩余 <b style="color:${qLeft > 0 ? "#67c23a" : "#f56c6c"}">${qLeft}</b> 人${qLeft <= 0 ? ' <span class="badge off" style="font-size:12px;padding:2px 8px">已满</span>' : ""}`
+    : `<span class="badge ok" style="font-size:12px;padding:2px 8px">不限制</span>　当前共 <b>${qUsed}</b> 个 VPN 账号`;
   const tip = s.state === "expired"
     ? `⚠ 试用已于 ${esc(s.trial_end)} 到期，除本页外的功能已锁定。请在下方粘贴许可串激活。`
     : (isLic ? `✓ 已授权给「${esc(s.company || s.customer || "-")}」，有效期至 ${esc(s.expire)}（剩 ${s.days_left} 天）。${s.unbound ? "该许可不绑定机器，同时仅授权 1 台在用。" : ""}`
@@ -1967,6 +1998,9 @@ async function pageLicense(main) {
         <a class="lk" style="margin-left:10px" onclick="licenseCopy()">复制</a>
         <span style="color:#909399;font-size:12px;margin-left:8px">（仅绑定机器的许可才需要提供）</span></td></tr>
       ${licRows || '<tr><td>授权到期日</td><td>-</td></tr>'}
+      <tr><td>授权档位</td><td><b style="color:var(--primary)">${esc(tierName)}</b>${isLic ? "" : "（试用期 / 未激活）"}${s.edition && s.edition !== s.tier ? ' <span style="color:#909399;font-size:12px">许可标识 ' + esc(s.edition) + '</span>' : ""}</td></tr>
+      <tr><td>已开启功能</td><td>${featTags || '<span style="color:#909399">仅核心 VPN 功能</span>'}</td></tr>
+      <tr><td>用户数上限</td><td>${quotaCell}</td></tr>
       ${s.state === "licensed" ? "" : `<tr><td>试用期</td><td>${esc(String(s.trial_days || 15))} 天，截止 <b>${esc(s.trial_end || "-")}</b></td></tr>`}
       <tr><td>服务器时间</td><td>${esc(s.server_time || "-")}</td></tr>
       ${s.token_error ? `<tr><td>许可串异常</td><td style="color:#f56c6c">${esc(s.token_error)}</td></tr>` : ""}
@@ -1982,15 +2016,24 @@ async function pageLicense(main) {
     <details style="margin-top:16px">
       <summary style="cursor:pointer;color:#909399;font-size:12.5px">签发方式（内部参考，默认收起）</summary>
       <div class="tip-banner" style="display:block;margin-top:8px;background:#f4f4f5;border-color:#e9e9eb;color:#606266">
-        <b>签发方式</b>（在授权端执行，私钥 <code>deploy/keys/license-private.pem</code> 不出签发机）：<br>
+        <b>签发方式</b>（在授权端执行，私钥 <code>deploy/keys/license-private.pem</code> 不出签发机；宿主机 PATH 里默认没有 <code>sslvpn</code> 命令，需先 <code>go build</code> 生成，或从容器 <code>docker cp sslvpn-go:/usr/local/bin/sslvpn ./sslvpn</code> 取出）：<br>
         <div style="margin:10px 0 4px"><b>① 不绑机器</b>（推荐，客户只需给邮箱 + 公司名）：</div>
-        <code style="display:inline-block">./sslvpn license-gen -bind none -email 客户邮箱@xx.com -company "某某公司" -days 365</code>
+        <code style="display:inline-block">./sslvpn license-gen -key deploy/keys/license-private.pem -bind none -email 客户邮箱@xx.com -company "某某公司" -days 365</code>
         <div style="margin:10px 0 4px"><b>② 绑定机器</b>（客户先发来机器码）：</div>
-        <code style="display:inline-block">./sslvpn license-gen -machine ${esc(s.machine)} -company "某某公司" -days 365</code>
+        <code style="display:inline-block">./sslvpn license-gen -key deploy/keys/license-private.pem -machine ${esc(s.machine)} -company "某某公司" -days 365</code>
+        <div style="margin:10px 0 4px"><b>③ 指定授权档位</b>（不传 <code>-edition</code> 即社区版）：</div>
+        <code style="display:inline-block">./sslvpn license-gen -key deploy/keys/license-private.pem -bind none -email 客户邮箱@xx.com -company "某某公司" -edition pro</code><br>
+        <code style="display:inline-block;margin-top:4px">… -edition enterprise　或　-edition pro -features domain_route,sso</code>
+        <div style="margin:10px 0 4px"><b>④ 限制 VPN 用户数</b>（<code>-max-users N</code>；不传或为 0 = <b>不限制</b>）：</div>
+        <code style="display:inline-block">./sslvpn license-gen -key deploy/keys/license-private.pem -bind none -email 客户邮箱@xx.com -company "某某公司" -edition pro -max-users 50</code>
         <div style="margin-top:10px;line-height:1.9">
-          浮动许可同时仅限 <b>1 台</b>在用：换机时先在原机点「解除激活」，再到新机激活；<br>
+          <b>档位</b>：社区版 = 核心 VPN；专业版 = ＋域名分流 / SSO / CCD / LDAP / 客户端分发；企业版 = ＋多实例 / 私有化签发 / 证书自动续签。<br>
+          <b>用户数</b>：<code>-max-users N</code> 限制 VPN 账号总数（含禁用账号；管理员账号不计入），到达上限后新增 / 批量导入 / 自助注册 / LDAP 同步返回 <b>403</b>；不传或为 0 不限制，早期签发的旧许可串同样不限制。用量在本页与「VPN 用户列表」顶部实时显示，删除闲置账号可释放额度。<br>
+          超出档位的高级接口返回 <b>403</b>，试用到期未激活返回 <b>402</b>；激活后刷新本页，菜单按新档位更新。<br>
+          <b>私钥路径按当前目录写</b>：在 <code>deploy/keys/</code> 下执行时 <code>-key</code> 改为 <code>./license-private.pem</code>。<br>
+          浮动许可同时仅限 <b>1 台服务器</b>在用（<code>-nodes</code> 管的是<b>服务器台数</b>，与 <code>-max-users</code> 的<b>账号数</b>是两个独立维度）：换机时先在原机点「解除激活」，再到新机激活；限制同时在线连接数请到「连接配置 → 编辑实例」调整「最大客户端数」。<br>
           需要强约束（同一许可只能一台机器激活）时启用在线登记：<code>sslvpn license-registry</code> + 环境变量
-          <code>SSLVPN_LICENSE_REGISTER</code> / <code>SSLVPN_LICENSE_SECRET</code>；<br>
+          <code>SSLVPN_LICENSE_REGISTER</code> / <code>SSLVPN_LICENSE_SECRET</code>；单台自用无需启用。<br>
           签发后可自检：<code>./sslvpn license-inspect -token '…'</code>
         </div>
       </div>

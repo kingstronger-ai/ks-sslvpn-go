@@ -16,6 +16,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"sslvpn/internal/db"
+	"sslvpn/internal/license"
 	"sslvpn/internal/mail"
 	"sslvpn/internal/middleware"
 	"sslvpn/internal/util"
@@ -338,11 +339,17 @@ func RegisterVpnUser(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "用户名已存在")
 		return
 	}
+	// 自助注册同样受许可用户数上限约束，避免绕过后台限制
+	if err := license.CanAddUsers(1); err != nil {
+		util.FailCode(w, 403, err.Error())
+		return
+	}
 	if _, err := db.DB.Exec(`INSERT INTO account(username,password,email,status,created_at) VALUES(?,?,?,1,datetime('now','localtime'))`,
 		req.Username, req.Password, req.Email); err != nil {
 		util.Fail(w, "注册失败")
 		return
 	}
+	license.Invalidate()
 	_, _ = db.DB.Exec(`DELETE FROM secure_code WHERE id=?`, id)
 	if err := vpn.IssueUserCert(req.Username); err != nil {
 		util.OKMsg(w, "注册成功（证书签发失败，请联系管理员重建配置）", nil)

@@ -17,6 +17,7 @@ import (
 
 	"sslvpn/internal/db"
 	"sslvpn/internal/fw"
+	"sslvpn/internal/license"
 	"sslvpn/internal/mail"
 	"sslvpn/internal/util"
 	"sslvpn/internal/vpn"
@@ -702,7 +703,8 @@ func LdapSync(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "同步失败: "+err.Error())
 		return
 	}
-	added, skipped := 0, 0
+	added, skipped, quotaFull := 0, 0, 0
+	limit, used, _ := license.UserQuota()
 	for _, u := range users {
 		if !validName(u) {
 			continue
@@ -713,14 +715,21 @@ func LdapSync(w http.ResponseWriter, r *http.Request) {
 			skipped++
 			continue
 		}
+		if limit > 0 && used >= limit {
+			quotaFull++
+			continue
+		}
 		if _, err := db.DB.Exec(`INSERT INTO account(username,password,auth_type,status,created_at) VALUES(?,?,?,1,datetime('now','localtime'))`,
 			u, "-", "ldap"); err == nil {
+			used++
 			_ = vpn.IssueUserCert(u)
 			added++
 		}
 	}
 	syncAuthFiles()
-	util.OK(w, map[string]int{"added": added, "skipped": skipped, "total": len(users)})
+	license.Invalidate()
+	util.OK(w, map[string]int{"added": added, "skipped": skipped, "total": len(users),
+		"quota_full": quotaFull, "user_limit": limit, "user_used": used})
 }
 
 // LdapPing 测试连接：管理员绑定 + 统计匹配用户数（对齐原版"成功匹配 N 个用户"）
@@ -790,7 +799,8 @@ func LdapImport(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "同步失败: "+err.Error())
 		return
 	}
-	added, skipped := 0, 0
+	added, skipped, quotaFull := 0, 0, 0
+	limit, used, _ := license.UserQuota()
 	for _, u := range users {
 		if len(req.Usernames) > 0 && !set[u.Username] {
 			continue
@@ -804,15 +814,22 @@ func LdapImport(w http.ResponseWriter, r *http.Request) {
 			skipped++
 			continue
 		}
+		if limit > 0 && used >= limit {
+			quotaFull++
+			continue
+		}
 		if _, err := db.DB.Exec(`INSERT INTO account(username,password,auth_type,email,group_id,status,created_at) VALUES(?,?,?,?,?,1,datetime('now','localtime'))`,
 			u.Username, "-", "ldap", u.Email, req.GroupID); err == nil {
+			used++
 			_ = vpn.IssueUserCert(u.Username)
 			added++
 		}
 	}
 	syncAuthFiles()
-	db.Syslog("admin", "导入 LDAP 用户", fmt.Sprintf("新增 %d 跳过 %d", added, skipped), clientIP(r))
-	util.OK(w, map[string]int{"added": added, "skipped": skipped, "total": len(users)})
+	license.Invalidate()
+	db.Syslog("admin", "导入 LDAP 用户", fmt.Sprintf("新增 %d 跳过 %d 配额受限 %d", added, skipped, quotaFull), clientIP(r))
+	util.OK(w, map[string]int{"added": added, "skipped": skipped, "total": len(users),
+		"quota_full": quotaFull, "user_limit": limit, "user_used": used})
 }
 
 // ---------- 系统日志 / 访问日志 ----------

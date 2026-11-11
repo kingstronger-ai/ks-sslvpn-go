@@ -39,7 +39,8 @@ docker compose up -d --build
 - 试用到期且未激活许可时，除「授权管理」外的所有功能接口返回 `402`，登录仍可用，前端会自动
   跳到授权页。
 - 许可为 **Ed25519 签名串**，两种模式：**绑定机器码** 或 **不绑机器（浮动许可，仅限 1 台在用）**。
-- 界面：系统管理 → **授权管理**（机器码、状态、剩余天数、粘贴激活、解除激活）。
+- 界面：系统管理 → **授权管理**（机器码、状态、剩余天数、档位、用户数上限与实时用量、粘贴激活、解除激活）。
+- **可选用户数上限**：签发时加 `-max-users N` 限制 VPN 账号总数；不传或为 0 表示不限制（详见本章「用户数上限」）。
 - 签发（授权端，私钥 `deploy/keys/license-private.pem` 不要放进镜像）：
 
 ```bash
@@ -49,9 +50,10 @@ docker compose up -d --build
 # ② 绑定机器：目标服务器先执行 docker exec sslvpn-go sslvpn license-info 取机器码
 ./sslvpn license-gen -machine 908B-ADFD-D055-BFC0 -company "某某科技有限公司" -days 365
 
-# 自检 / 固定到期日 / 指定台数
+# 自检 / 固定到期日 / 指定台数 / 限制用户数
 ./sslvpn license-inspect -token '<许可串>'
 ./sslvpn license-gen -bind none -email 421381118@qq.com -company "X公司" -expire 2027-12-31 -nodes 1
+./sslvpn license-gen -bind none -email 421381118@qq.com -company "X公司" -edition pro -max-users 50
 ```
 
 > **许可编号**：不传 `-id` 时 `license-gen` 从 **1** 开始按序号自增，序号持久化在与私钥同目录的
@@ -96,6 +98,25 @@ cd backend && go build -o sslvpn ./cmd/sslvpn
 
 > 说明：授权拦截只作用于 Web/API 层，已建立的 OpenVPN 隧道与 `auth-verify` 认证不受影响。
 
+### 用户数上限（可选，默认不限制）
+
+签发时加 `-max-users N` 会把许可绑定到最多 `N` 个 VPN 账号（许可负载字段 `mu`）。**不传、填 0 或旧许可串（无 `mu`）都表示不限制用户数**；用户数与 `-edition` 档位彼此独立，可任意组合。
+
+```bash
+# 最多 50 个 VPN 用户 + 专业版功能
+./sslvpn license-gen -bind none -email 421381118@qq.com -company "某某科技有限公司" \
+    -edition pro -max-users 50
+
+# 签发输出与自检都会显示「用户上限: 50 人」
+./sslvpn license-inspect -token '<许可串>'
+```
+
+- **统计口径**：`account` 表全部账号（含禁用账号），避免禁用/启用绕过；后台管理员账号不计入。
+- **拦截范围**：新增用户、批量导入、自助注册、LDAP 同步与导入全部走同一校验，达到上限返回应用层 `403`「当前许可最多允许 N 个 VPN 用户，已有 M 个…」。删除闲置账号立即释放额度。
+- **页面显示**：「授权管理」显示上限 / 已用 / 剩余；「VPN 用户列表」顶部显示用量条，额度用尽时「添加用户」按钮置灰。
+- **三个维度别混淆**：`-nodes` 管服务器台数、`-max-users` 管账号总数、实例配置的 `max_clients` 管同时在线连接数。
+- 更换为更大用户数的许可后，需在「授权管理」先解除激活再粘贴新许可串（或换新机后重新激活）。
+
 ### 版本档位（社区版 / 专业版 / 企业版）
 
 许可负载中的 `ed`（Edition）决定档位；也可用 `ft`（Features）给出显式功能清单（优先级更高）。
@@ -137,7 +158,7 @@ Web 端只负责检测版本、展示更新说明、记录用户确认与展示�
 
 ```bash
 # ① 部署含本功能的版本包（顶层目录 sslvpn-go/，原地覆盖解压，目录名不能变）
-cd /opt && tar -xzf /opt/sslvpn-go/sslvpn-go-v1.2.0.tar.gz -C /opt
+cd /opt && tar -xzf /opt/sslvpn-go/sslvpn-go-v1.2.2.tar.gz -C /opt
 cd /opt/sslvpn-go && docker compose up -d --build
 
 # ② 安装宿主机升级代理（systemd 常驻，自动拉起）
@@ -153,7 +174,7 @@ bash deploy/install-upgrade-agent.sh
 cp deploy/version.json.example /opt/sslvpn-upgrade/version.json
 #    编辑 version.json：把 sha256 换成实际包的 sha256，package 指向包路径
 mkdir -p /opt/sslvpn-upgrade/packages
-cp sslvpn-go-v1.2.0.tar.gz /opt/sslvpn-upgrade/packages/
+cp sslvpn-go-v1.2.2.tar.gz /opt/sslvpn-upgrade/packages/
 ```
 
 代理会每 5 秒把宿主机 `/opt/sslvpn-upgrade/version.json` 同步进容器，供 `file://` 更新源读取；

@@ -16,6 +16,7 @@ import (
 
 	"sslvpn/internal/db"
 	"sslvpn/internal/fw"
+	"sslvpn/internal/license"
 	"sslvpn/internal/mail"
 	"sslvpn/internal/util"
 	"sslvpn/internal/version"
@@ -103,6 +104,11 @@ func AccountAdd(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "用户名已存在")
 		return
 	}
+	// 许可用户数上限（不带 -max-users 签发的许可无限制）
+	if err := license.CanAddUsers(1); err != nil {
+		util.FailCode(w, 403, err.Error())
+		return
+	}
 	if _, err := db.DB.Exec(`INSERT INTO account(username,password,auth_type,totp_secret,email,login_aliases,expire_date,group_id,status,note,created_at)
 		VALUES(?,?,?,?,?,?,?,?,1,?,datetime('now','localtime'))`,
 		a.Username, a.Password, a.AuthType, a.TOTPSecret, a.Email, a.LoginAliases,
@@ -110,6 +116,7 @@ func AccountAdd(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "创建失败: "+err.Error())
 		return
 	}
+	license.Invalidate()
 	if err := vpn.IssueUserCert(a.Username); err != nil {
 		util.OKMsg(w, "用户已创建，但证书签发失败: "+err.Error(), nil)
 		return
@@ -306,6 +313,7 @@ func AccountDelete(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "删除失败")
 		return
 	}
+	license.Invalidate()
 	_ = vpn.RevokeUserCert(username)
 	// 清理各实例 CCD
 	if rows, err := db.DB.Query(`SELECT name FROM service`); err == nil {
@@ -529,6 +537,8 @@ func AccountBatchUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	okN, failN := 0, 0
 	var fails []string
+	// 许可用户数上限：预取额度并在导入过程中本地累减，超出的用户明确给出拒绝原因
+	limit, used, _ := license.UserQuota()
 	for _, u := range req.Users {
 		if !validName(u.Username) {
 			failN++
@@ -545,16 +555,24 @@ func AccountBatchUpload(w http.ResponseWriter, r *http.Request) {
 			fails = append(fails, u.Username+":已存在")
 			continue
 		}
+		if limit > 0 && used >= limit {
+			failN++
+			fails = append(fails, fmt.Sprintf("%s:已达授权用户数上限 %d 人", u.Username, limit))
+			continue
+		}
 		if _, err := db.DB.Exec(`INSERT INTO account(username,password,email,expire_date,status,note,created_at)
 			VALUES(?,?,?,?,1,?,datetime('now','localtime'))`, u.Username, u.Password, u.Email, u.ExpireDate, u.Note); err != nil {
 			failN++
 			continue
 		}
+		used++
 		_ = vpn.IssueUserCert(u.Username)
 		okN++
 	}
 	syncAuthFiles()
-	util.OK(w, map[string]any{"ok": okN, "fail": failN, "fails": fails})
+	license.Invalidate()
+	util.OK(w, map[string]any{"ok": okN, "fail": failN, "fails": fails,
+		"user_limit": limit, "user_used": used})
 }
 
 func AccountBatchDelete(w http.ResponseWriter, r *http.Request) {
@@ -576,6 +594,7 @@ func AccountBatchDelete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	syncAuthFiles()
+	license.Invalidate()
 	util.OK(w, map[string]int{"deleted": n})
 }
 
