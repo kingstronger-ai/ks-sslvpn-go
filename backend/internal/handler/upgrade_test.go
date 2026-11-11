@@ -123,4 +123,62 @@ func TestReadBackupsNewestFirst(t *testing.T) {
 	if len(list) != 2 || list[0]["id"] != "bk-b" || list[1]["id"] != "bk-a" {
 		t.Fatalf("备份列表应按时间倒序：%+v", list)
 	}
+	if list[0]["protected"] != "1" || list[1]["protected"] != "1" {
+		t.Fatalf("全部不足 2 份时应都受保护：%+v", list)
+	}
+}
+
+func TestReadBackupsProtectsNewestTwo(t *testing.T) {
+	dir := setupUpgradeEnv(t, "9.9.9", testSHA)
+	content := "bk-a|t1|1.1.0|10M|/x/a\nbk-b|t2|1.1.0|10M|/x/b\nbk-c|t3|1.1.0|10M|/x/c\n"
+	if err := os.WriteFile(filepath.Join(dir, "backups.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	list := readBackups()
+	if list[0]["id"] != "bk-c" || list[0]["protected"] != "1" ||
+		list[1]["id"] != "bk-b" || list[1]["protected"] != "1" ||
+		list[2]["id"] != "bk-a" || list[2]["protected"] != "" {
+		t.Fatalf("应仅最近 2 份受保护：%+v", list)
+	}
+}
+
+func TestUpgradeBackupDeleteProtectedAndUnknown(t *testing.T) {
+	dir := setupUpgradeEnv(t, "9.9.9", testSHA)
+	content := "bk-a|t1|1.1.0|10M|/x/a\nbk-b|t2|1.1.0|10M|/x/b\nbk-c|t3|1.1.0|10M|/x/c\n"
+	if err := os.WriteFile(filepath.Join(dir, "backups.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"bk-c", "bk-b"} {
+		if r := callUpgrade(t, UpgradeBackupDelete, "POST", `{"confirm":true,"backup_id":"`+id+`"}`); r.Code == 1 {
+			t.Fatalf("最近的备份 %s 不应允许删除", id)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "request.json")); !os.IsNotExist(err) {
+		t.Fatal("被拒绝时不应写入删除请求")
+	}
+	if r := callUpgrade(t, UpgradeBackupDelete, "POST", `{"confirm":true,"backup_id":"bk-zzz"}`); r.Code == 1 {
+		t.Fatal("不存在的备份不应允许删除")
+	}
+	r := callUpgrade(t, UpgradeBackupDelete, "POST", `{"confirm":true,"backup_id":"bk-a"}`)
+	if r.Code != 1 {
+		t.Fatalf("较早的备份应允许删除：%+v", r)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "request.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req map[string]string
+	if err := json.Unmarshal(b, &req); err != nil {
+		t.Fatal(err)
+	}
+	if req["action"] != "delete_backup" || req["backup_id"] != "bk-a" {
+		t.Fatalf("删除请求内容异常：%s", b)
+	}
+}
+
+func TestUpgradeBackupDeleteRequiresConfirm(t *testing.T) {
+	setupUpgradeEnv(t, "9.9.9", testSHA)
+	if r := callUpgrade(t, UpgradeBackupDelete, "POST", `{"backup_id":"bk-a"}`); r.Code == 1 {
+		t.Fatal("缺少 confirm 不应放行")
+	}
 }

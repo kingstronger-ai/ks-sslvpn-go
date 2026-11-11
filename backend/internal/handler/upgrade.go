@@ -161,6 +161,12 @@ func readBackups() []map[string]string {
 			"id": p[0], "time": p[1], "version": p[2], "size": p[3], "path": p[4],
 		}}, out...)
 	}
+	// 最近 2 份（新备份在前）受保护：可回滚，但不可删除，保证随时有退路
+	for i := range out {
+		if i < 2 {
+			out[i]["protected"] = "1"
+		}
+	}
 	return out
 }
 
@@ -292,6 +298,59 @@ func UpgradeStatus(w http.ResponseWriter, r *http.Request) {
 // UpgradeBackups 升级前自动生成的备份清单（可回滚）
 func UpgradeBackups(w http.ResponseWriter, r *http.Request) {
 	util.OK(w, map[string]any{"list": readBackups()})
+}
+
+// UpgradeBackupDelete 删除较早的升级备份以释放磁盘空间。
+// 最近 2 份受保护（前端不显示按钮，此处再拦一道）；真实删除由宿主机代理执行。
+func UpgradeBackupDelete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BackupID string `json:"backup_id"`
+		Confirm  bool   `json:"confirm"`
+	}
+	if err := decodeBody(r, &req); err != nil || !req.Confirm || strings.TrimSpace(req.BackupID) == "" {
+		util.Fail(w, "请确认要删除的备份")
+		return
+	}
+	id := strings.TrimSpace(req.BackupID)
+	var protected bool
+	exists := false
+	for i, b := range readBackups() {
+		if b["id"] == id {
+			exists = true
+			protected = i < 2
+			break
+		}
+	}
+	if !exists {
+		util.Fail(w, "找不到该备份，可能已被清理")
+		return
+	}
+	if protected {
+		util.Fail(w, "最近 2 份备份受保护，不能删除；升级产生新备份后，更早的备份即可删除")
+		return
+	}
+	if !agentOnline() {
+		util.Fail(w, "宿主机升级代理未在线，无法删除备份")
+		return
+	}
+	upgradeMu.Lock()
+	defer upgradeMu.Unlock()
+	if upgradeBusy() {
+		util.Fail(w, "已有升级/回滚任务进行中，请稍后再试")
+		return
+	}
+	rid := strconv.FormatInt(time.Now().UnixNano(), 10)
+	if err := writeRequest(map[string]string{
+		"id":           rid,
+		"action":       "delete_backup",
+		"backup_id":    id,
+		"requested_at": time.Now().Format(time.RFC3339),
+	}); err != nil {
+		util.Fail(w, "写入删除请求失败："+err.Error())
+		return
+	}
+	db.Syslog("admin", "删除升级备份", id, clientIP(r))
+	util.OKMsg(w, "删除请求已提交，代理将移除该备份目录", map[string]any{"request_id": rid, "backup_id": id})
 }
 
 // UpgradeLog 代理执行日志（纯文本），前端只做展示

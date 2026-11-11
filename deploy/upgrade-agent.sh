@@ -266,6 +266,25 @@ do_upgrade() {
   fi
 
   newver="$(tr -d '\r\n' < "$APP_DIR/backend/internal/version/VERSION" 2>/dev/null || echo "$ver")"
+
+  # ⑦ 代理自更新：新版包若带新的 upgrade-agent.sh，替换自身副本并重启服务加载
+  #    （systemd 单元跑的是 $WORK/upgrade-agent.sh，不随应用升级自动更新；mv 原子替换，
+  #     正在运行的旧进程不受影响，重启由 systemd 拉起新脚本）
+  if [ -f "$APP_DIR/deploy/upgrade-agent.sh" ] && ! cmp -s "$APP_DIR/deploy/upgrade-agent.sh" "$WORK/upgrade-agent.sh"; then
+    if cp -a "$APP_DIR/deploy/upgrade-agent.sh" "$WORK/upgrade-agent.sh.new" \
+       && mv -f "$WORK/upgrade-agent.sh.new" "$WORK/upgrade-agent.sh"; then
+      chmod +x "$WORK/upgrade-agent.sh"
+      logline "升级代理脚本已自更新，即将重启代理加载新逻辑"
+      set_status "done" 100 "升级完成，当前版本 $newver；升级前备份 $bid 可随时回滚；升级代理已自更新" "$newver"
+      logline "升级完成：$newver（备份 $bid）"
+      if [ -f /etc/systemd/system/sslvpn-upgrade-agent.service ]; then
+        systemctl restart sslvpn-upgrade-agent 2>/dev/null || true
+      fi
+      return 0
+    fi
+    logline "升级代理自更新失败，继续使用旧代理（不影响本次升级结果）"
+  fi
+
   set_status "done" 100 "升级完成，当前版本 $newver；升级前备份 $bid 可随时回滚" "$newver"
   logline "升级完成：$newver（备份 $bid）"
 }
@@ -279,6 +298,46 @@ do_rollback_request() {
   else
     set_status "failed" 100 "回滚失败，请查看日志与 $WORK/backups/$bid 手动处理"
   fi
+}
+
+# ---------- 删除较早的备份（最近 2 份受保护，代理侧强制执行） ----------
+do_delete_backup() {
+  local rid="$1" bid="$2" total match_line bkdir left
+  CUR_ID="$rid"; CUR_BID=""
+  logline "收到删除备份请求 id=$rid 备份 $bid"
+  case "$bid" in
+    bk-*) [ "${bid#*/}" = "$bid" ] || { set_status "failed" 100 "备份 ID 不合法，已拒绝删除"; return 1; } ;;
+    *) set_status "failed" 100 "备份 ID 不合法，已拒绝删除"; return 1 ;;
+  esac
+  if [ ! -s "$WORK/backups.txt" ]; then
+    set_status "failed" 100 "备份清单为空，找不到 $bid"; return 1
+  fi
+  # backups.txt 为追加式（最后的行最新）：最新 2 行受保护
+  total="$(grep -c . "$WORK/backups.txt" 2>/dev/null || echo 0)"
+  match_line="$(grep -n "^${bid}|" "$WORK/backups.txt" 2>/dev/null | head -1 | cut -d: -f1)"
+  if [ -z "$match_line" ]; then
+    set_status "failed" 100 "找不到备份 $bid，可能已被清理"; return 1
+  fi
+  if [ "$match_line" -gt "$((total - 2))" ] 2>/dev/null; then
+    set_status "failed" 100 "最近 2 份备份受保护，不能删除"; return 1
+  fi
+  # 防路径注入：只允许删除登记在 $WORK/backups/ 下的目录
+  bkdir="$(grep "^${bid}|" "$WORK/backups.txt" | head -1 | cut -d'|' -f5)"
+  case "$bkdir" in
+    "$WORK"/backups/*) : ;;
+    *) set_status "failed" 100 "备份路径异常，已拒绝删除"; return 1 ;;
+  esac
+  [ -d "$bkdir" ] || { set_status "failed" 100 "备份目录不存在：$bkdir"; return 1; }
+  if ! rm -rf -- "$bkdir"; then
+    set_status "failed" 100 "删除目录失败，请检查权限：$bkdir"
+    return 1
+  fi
+  grep -v "^${bid}|" "$WORK/backups.txt" > "$WORK/backups.txt.tmp" \
+    && mv -f "$WORK/backups.txt.tmp" "$WORK/backups.txt"
+  put "$WORK/backups.txt" backups.txt
+  left="$(grep -c . "$WORK/backups.txt" 2>/dev/null || echo 0)"
+  set_status "done" 100 "已删除备份 $bid，剩余 $left 份备份"
+  logline "已删除备份 $bid（目录 $bkdir），剩余 $left 份"
 }
 
 # ---------- 主循环 ----------
@@ -302,8 +361,9 @@ while true; do
     if [ -n "$rid" ] && [ "$rid" != "$last" ]; then
       echo "$rid" > "$LAST_ID_FILE"
       case "$(jget "$req" action)" in
-        upgrade)  do_upgrade "$rid" "$(jget "$req" version)" "$(jget "$req" package)" "$(jget "$req" sha256)" ;;
-        rollback) do_rollback_request "$rid" "$(jget "$req" backup_id)" ;;
+        upgrade)       do_upgrade "$rid" "$(jget "$req" version)" "$(jget "$req" package)" "$(jget "$req" sha256)" ;;
+        rollback)      do_rollback_request "$rid" "$(jget "$req" backup_id)" ;;
+        delete_backup) do_delete_backup "$rid" "$(jget "$req" backup_id)" ;;
         *) logline "忽略未知升级请求 action" ;;
       esac
     fi

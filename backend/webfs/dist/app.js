@@ -2320,9 +2320,10 @@ async function upgradeStatus() {
   const bk = document.getElementById("upBackups");
   if (bk) {
     const list = d.backups || [];
-    bk.innerHTML = list.length ? `<table><tr><th>备份 ID</th><th>时间</th><th>升级前版本</th><th>大小</th><th style="width:110px">操作</th></tr>
-      ${list.map(b => `<tr><td>${esc(b.id)}</td><td>${esc(b.time)}</td><td>${esc(b.version)}</td><td>${esc(b.size)}</td>
-        <td><a href="javascript:;" class="lk r" data-id="${esc(b.id)}" data-ver="${esc(b.version)}" onclick="upgradeRollback(this)">↩ 回滚</a></td></tr>`).join("")}</table>`
+    bk.innerHTML = list.length ? `<table><tr><th>备份 ID</th><th>时间</th><th>升级前版本</th><th>大小</th><th style="width:150px">操作</th></tr>
+      ${list.map(b => `<tr><td>${esc(b.id)}${b.protected ? ' <span class="muted" style="font-size:11px">🔒 保护</span>' : ""}</td><td>${esc(b.time)}</td><td>${esc(b.version)}</td><td>${esc(b.size)}</td>
+        <td><a href="javascript:;" class="lk r" data-id="${esc(b.id)}" data-ver="${esc(b.version)}" onclick="upgradeRollback(this)">↩ 回滚</a>${b.protected ? "" : `<a href="javascript:;" class="lk r" data-id="${esc(b.id)}" onclick="upgradeBackupDelete(this)" style="margin-left:10px">🗑 删除</a>`}</td></tr>`).join("")}</table>
+      <div class="muted" style="font-size:12px;margin-top:8px">最近 2 份备份受保护（可回滚、不可删除），保证随时有退路；更早的备份可删除释放磁盘（目录 <code>/opt/sslvpn-upgrade/backups/</code>）。删除后无法再回滚到该版本。</div>`
       : '<div class="muted" style="font-size:12px">尚无备份。每次升级前代理都会自动生成一份。</div>';
   }
   const lg = document.getElementById("upLog");
@@ -2333,6 +2334,15 @@ function upgradeRollback(a) {
   const id = a.dataset.id, ver = a.dataset.ver;
   confirmModal("确认回滚", `将把源码、配置与两个数据卷恢复到 <b>${esc(ver)}</b> 升级前的状态（备份 <b>${esc(id)}</b>）。<br><br>⚠ 回滚期间服务会中断，且<b>升级后新增的数据会丢失</b>。`, async () => {
     const r = await api("/upgrade/rollback", { body: { backup_id: id, confirm: true } });
+    toast(r.msg, r.code === 1);
+    await upgradeStatus();
+  });
+}
+
+function upgradeBackupDelete(a) {
+  const id = a.dataset.id;
+  confirmModal("确认删除备份", `将永久删除备份 <b>${esc(id)}</b> 及其目录（源码、配置与数据卷快照一并删除）。<br><br>⚠ 删除后<b>无法再回滚到该备份对应的版本</b>，且不可恢复；最近 2 份备份受保护不可删除。`, async () => {
+    const r = await api("/upgrade/backup/delete", { body: { backup_id: id, confirm: true } });
     toast(r.msg, r.code === 1);
     await upgradeStatus();
   });

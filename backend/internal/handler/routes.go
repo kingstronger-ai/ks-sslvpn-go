@@ -129,6 +129,7 @@ func init() {
 	reg("GET", "/upgrade/backups", true, UpgradeBackups)
 	reg("GET", "/upgrade/log", true, UpgradeLog)
 	reg("POST", "/upgrade/rollback", true, UpgradeRollback)
+	reg("POST", "/upgrade/backup/delete", true, UpgradeBackupDelete)
 	reg("GET", "/system/getBackupInfo", true, SysBackupInfo)
 	reg("GET", "/system/getMailTemplate", true, MailTemplateGet)
 	reg("POST", "/system/updateMailTemplate", true, MailTemplateUpdate)

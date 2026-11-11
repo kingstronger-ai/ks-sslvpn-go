@@ -1,8 +1,8 @@
 {
-  "version": "1.2.2",
+  "version": "1.2.3",
   "released_at": "2026-11-11",
-  "notes": "KSVPN v1.2.2：许可新增 -max-users 用户数上限（不加则不限制，兼容旧许可）；授权管理页显示档位/功能与用户额度，用户列表显示用量条；补齐后台签发说明。",
-  "package": "https://gitee.com/KingStrongerGee/ssvpn/releases/download/v1.2.2/sslvpn-go-v1.2.2.tar.gz",
-  "sha256": "5f2392ed7db609ceadbe7e4593d0b7886e1710240df06fff94439b7de0718b19",
+  "notes": "KSVPN v1.2.3：升级备份支持删除（最近 2 份受保护不可删），升级代理支持自更新脚本；其余同 v1.2.2（许可 -max-users 用户数上限等）。",
+  "package": "https://gitee.com/KingStrongerGee/ssvpn/releases/download/v1.2.3/sslvpn-go-v1.2.3.tar.gz",
+  "sha256": "e32734529e97ae3c2753f5a87f8bc83e5fefb4ef2bb2ad038699133b540edae4",
   "min_version": "1.2.0"
 }

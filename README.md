@@ -206,6 +206,12 @@ cp sslvpn-go-v1.2.2.tar.gz /opt/sslvpn-upgrade/packages/
 回滚会恢复源码、配置与两个卷，并用备份时的镜像直接启动（无需联网重新构建）；升级失败的现场目录
 保留为 `/opt/sslvpn-go.failed-<备份ID>` 便于排查。**回滚会把数据卷恢复到升级前，升级后新增的数据会丢失**。
 
+**备份清理（v1.2.3+）**：备份列表中**最近 2 份受保护**（可回滚、不可删除，保证随时有退路），
+更早的备份可在页面点「🗑 删除」释放磁盘；删除请求经容器校验后由代理执行，代理侧会再次校验
+「最近 2 份不可删」与备份路径必须位于 `/opt/sslvpn-upgrade/backups/` 之下。删除后无法再回滚到该版本。
+代理脚本支持**自更新**：升级包内若带新版 `deploy/upgrade-agent.sh`，升级成功后代理会自动替换
+`/opt/sslvpn-upgrade/upgrade-agent.sh` 并重启 systemd 服务加载新逻辑。
+
 代理任何情况下都不会执行 `docker compose down -v` 或删除数据卷；升级/回滚都必须保持目录名
 `/opt/sslvpn-go` 不变，否则 compose 项目名变化会挂到空卷上（看起来像数据全部丢失）。
 
