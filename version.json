@@ -1,8 +1,8 @@
 {
-  "version": "1.2.3",
-  "released_at": "2026-11-11",
-  "notes": "KSVPN v1.2.3：升级备份支持删除（最近 2 份受保护不可删），升级代理支持自更新脚本；其余同 v1.2.2（许可 -max-users 用户数上限等）。",
-  "package": "https://gitee.com/KingStrongerGee/ssvpn/releases/download/v1.2.3/sslvpn-go-v1.2.3.tar.gz",
-  "sha256": "e32734529e97ae3c2753f5a87f8bc83e5fefb4ef2bb2ad038699133b540edae4",
+  "version": "1.2.4",
+  "released_at": "2026-11-12",
+  "notes": "KSVPN v1.2.4：运行时命名统一为 ks-sslvpn-go（镜像 / 容器 / 部署目录 / 数据卷 / 产品名 / API 标识）；新增一次性改名割接脚本 deploy/migrate-to-ks-sslvpn-go.sh（停旧容器、拷贝数据卷、改写 compose 与升级代理系统服务，旧卷保留可回收）。升级前请先按脚本完成本地改名割接，再点「检查更新 → 升级」，否则会因容器名不一致被安全拒绝。其余能力同 v1.2.3（备份删除、代理自更新、许可 -max-users 用户数上限等）。",
+  "package": "https://gitee.com/KingStrongerGee/ssvpn/releases/download/v1.2.4/ks-sslvpn-go-v1.2.4.tar.gz",
+  "sha256": "5c8600017bc41953b4cf7cadcc9823748da0b3583b77272f6b4b78ee5783ac1a",
   "min_version": "1.2.0"
 }
