@@ -168,7 +168,7 @@ bash deploy/install-upgrade-agent.sh
 #      - SSLVPN_UPDATE_URL=file:///var/lib/sslvpn/upgrade/version.json
 #    cd /opt/ks-sslvpn-go && docker compose up -d
 #    （国内可把 version.json 放到 Gitee 仓库或自建站点，填 https:// 地址；
-#     例如 - SSLVPN_UPDATE_URL=https://gitee.com/KingStrongerGee/ssvpn/raw/main/version.json）
+#     例如 - SSLVPN_UPDATE_URL=https://gitee.com/KingStrongerGee/ks-sslvpn-go/raw/main/version.json）
 
 # ④ 放置更新源与升级包
 cp deploy/version.json.example /opt/sslvpn-upgrade/version.json
@@ -741,18 +741,18 @@ KSVPN 以源码公开（Source Available）方式发布，长期维护需要持�
 
 国内用户建议从 Gitee 获取（无需代理、速度快），GitHub 为同步镜像，两端内容一致。
 
-- [Gitee Releases 下载发布版](https://gitee.com/KingStrongerGee/ssvpn/releases)
-- [Gitee 查看源码与文档](https://gitee.com/KingStrongerGee/ssvpn)
-- [GitHub Releases（备用）](https://github.com/kingstronger-ai/ssvpn/releases)
-- [GitHub 源码（备用）](https://github.com/kingstronger-ai/ssvpn)
+- [Gitee Releases 下载发布版](https://gitee.com/KingStrongerGee/ks-sslvpn-go/releases)
+- [Gitee 查看源码与文档](https://gitee.com/KingStrongerGee/ks-sslvpn-go)
+- [GitHub Releases（备用）](https://github.com/kingstronger-ai/ks-sslvpn-go/releases)
+- [GitHub 源码（备用）](https://github.com/kingstronger-ai/ks-sslvpn-go)
 
 ```bash
 # 国内（推荐）
-git clone https://gitee.com/KingStrongerGee/ssvpn.git ks-sslvpn-go
+git clone https://gitee.com/KingStrongerGee/ks-sslvpn-go.git ks-sslvpn-go
 cd ks-sslvpn-go && docker compose up -d --build
 
 # 或 GitHub
-git clone https://github.com/kingstronger-ai/ssvpn.git ks-sslvpn-go
+git clone https://github.com/kingstronger-ai/ks-sslvpn-go.git ks-sslvpn-go
 ```
 
 > 克隆时务必把目录命名为 `ks-sslvpn-go`：目录名决定 Docker Compose 项目名，进而决定挂载哪一组
