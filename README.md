@@ -1,4 +1,4 @@
-# ks-sslvpn-go
+# KS-SSLVPN-Go
 
 **OpenVPN 企业远程接入 Web 管理系统**。后端使用 Go 单二进制实现，内置中文管理前端，
 Docker Compose 一键部署。
