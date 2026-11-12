@@ -698,19 +698,7 @@ docker run --rm -it -v "$(docker volume ls --format '{{.Name}}' | grep sslvpn-da
    打交付包时请排除该文件，只保留签发出来的许可串）。
 6. **防火墙**：只放行所需端口（本模板即 58443/tcp 与 51194/udp），数据库与 8080 不对外。
 7. **数据备份**：`sslvpn-data`（SQLite/证书/CCD）与 `sslvpn-openvpn`（实例配置）两个卷需纳入备份。
-8. **出交付包**：在项目根目录执行下列命令（务必排除签名私钥，且只带标准 compose）：
-
-   ```bash
-   tar -czf sslvpn-final.tar.gz \
-     --exclude='deploy/keys/license-private.pem' \
-     --exclude='deploy/keys/*.pem.bak' \
-     --exclude='backend/sslvpn' --exclude='backend/sslvpn.exe' \
-  Dockerfile README.md backend deploy docs docker-compose.yml
-  ```
-
-   打包后自查，下列命令应**无输出**：
-   `tar -tzf sslvpn-final.tar.gz | grep -E 'license-private|private.*\.pem|nas\.yml'`。
-   NAS / 群晖 / Unraid 的绑定目录模板由部署文档站单独提供，不随包分发。
+8. **出交付包**：标准交付物为 Gitee / GitHub Releases 上的 `ks-sslvpn-go-vX.Y.Z.tar.gz`（顶层目录 `ks-sslvpn-go/`，已自动排除签名私钥，并含内置桌面客户端安装包）。新装见「开始部署」，对已在运行的实例用「系统设置 → 版本升级」在线升级即可，无需手工打包。NAS / 群晖 / Unraid 的绑定目录模板由部署文档站单独提供，不随包分发。
 
 ## 捐赠与支持
 
