@@ -915,7 +915,7 @@ func SSOTokenVerify(w http.ResponseWriter, r *http.Request) {
 func SSOHealthz(w http.ResponseWriter, r *http.Request) {
 	cfg := feishuCfg()
 	ssoJSON(w, 200, map[string]any{
-		"ok": true, "service": "sslvpn-go", "version": "1.0.0",
+		"ok": true, "service": "ks-sslvpn-go", "version": "1.0.0",
 		"providers": ssoEnabledProviders(), "default_provider": ssoDefaultProvider(),
 		"feishu_enabled": cfg.Enabled, "mock": len(ssoEnabledProviders()) > 0 && ssoMockEnabled(ssoDefaultProvider()),
 	})

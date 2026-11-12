@@ -15,10 +15,10 @@
 
 services:
   sslvpn:
-    # 方式 B 使用离线镜像时，tag 要与 docker save 的镜像名一致
-    image: sslvpn-go:latest
+    # 方式 B 使用离线镜像时，tag 要与 docker save 的镜像名一致（离线包导入后须同名）
+    image: ks-sslvpn-go:latest
     build: .
-    container_name: sslvpn-go
+    container_name: ks-sslvpn-go
     restart: unless-stopped
     ports:
       - "58443:8443"     # Web 管理界面 (HTTPS)；容器内固定 8443，宿主侧用 58443

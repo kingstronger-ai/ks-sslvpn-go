@@ -12,7 +12,7 @@
     -key license-private.pem
 
 # 方式二：绑定机器（客户先发来机器码）
-docker exec sslvpn-go sslvpn license-info   # 在客户服务器上取机器码
+docker exec ks-sslvpn-go sslvpn license-info   # 在客户服务器上取机器码
 ./sslvpn license-gen -machine 908B-ADFD-D055-BFC0 -company "某某科技有限公司" -days 365 \
     -key license-private.pem
 

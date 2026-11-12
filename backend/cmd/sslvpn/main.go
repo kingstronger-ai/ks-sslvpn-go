@@ -290,7 +290,7 @@ func main() {
 	//	sslvpn reset-admin                        重置超级管理员，自动生成 16 位随机密码
 	//	sslvpn reset-admin -u admin -p NewPass123 指定用户名与新密码
 	//
-	// 容器内用法：docker exec -it sslvpn-go sslvpn reset-admin
+	// 容器内用法：docker exec -it ks-sslvpn-go sslvpn reset-admin
 	if len(os.Args) >= 2 && os.Args[1] == "reset-admin" {
 		fs := flag.NewFlagSet("reset-admin", flag.ExitOnError)
 		user := fs.String("u", "", "管理员用户名（留空=优先超级管理员，其次 id 最小者）")
@@ -379,7 +379,7 @@ func main() {
 		} else {
 			fmt.Printf("  新密码: 已按 -p 参数设置\n")
 		}
-		fmt.Println("提示：已登录的会话仍然有效；如需强制所有会话重新登录，请执行 `docker restart sslvpn-go`")
+		fmt.Println("提示：已登录的会话仍然有效；如需强制所有会话重新登录，请执行 `docker restart ks-sslvpn-go`")
 		return
 	}
 

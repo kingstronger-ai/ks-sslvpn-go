@@ -5,8 +5,8 @@ set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)/upgrade-agent.sh"
 DEST="${DEST:-/opt/sslvpn-upgrade}"
-APP_DIR="${APP_DIR:-/opt/sslvpn-go}"
-CONTAINER="${CONTAINER:-sslvpn-go}"
+APP_DIR="${APP_DIR:-/opt/ks-sslvpn-go}"
+CONTAINER="${CONTAINER:-ks-sslvpn-go}"
 
 [ "$(id -u)" -eq 0 ] || { echo "请用 root 执行"; exit 1; }
 [ -f "$SRC" ] || { echo "找不到 $SRC"; exit 1; }

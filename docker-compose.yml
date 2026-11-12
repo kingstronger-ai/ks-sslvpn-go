@@ -1,7 +1,8 @@
 services:
   sslvpn:
     build: .
-    container_name: sslvpn-go
+    image: ks-sslvpn-go:latest
+    container_name: ks-sslvpn-go
     restart: unless-stopped
     ports:
       - "58443:8443"     # Web 管理界面 (HTTPS)；容器内固定 8443，宿主侧用 58443

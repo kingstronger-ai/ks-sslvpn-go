@@ -164,7 +164,7 @@ func smtpCfg() *mail.Config { return loadSMTP() }
 func GetFlag(w http.ResponseWriter, r *http.Request) {
 	// 返回系统标识信息（原系统用于前端初始化判断）
 	util.OK(w, map[string]any{
-		"flag":          "sslvpn-go",
+		"flag":          "ks-sslvpn-go",
 		"register":      db.GetSetting("register_user_status") == "1",
 		"sys_name":      db.GetSetting("sys_name"),
 		"download_url":  db.GetSetting("download_url"),

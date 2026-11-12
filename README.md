@@ -47,7 +47,7 @@ docker compose up -d --build
 # ① 不绑机器（常用）：只需客户邮箱 + 公司名称，客户拿到就能激活
 ./sslvpn license-gen -bind none -email 421381118@qq.com -company "某某科技有限公司" -days 365
 
-# ② 绑定机器：目标服务器先执行 docker exec sslvpn-go sslvpn license-info 取机器码
+# ② 绑定机器：目标服务器先执行 docker exec ks-sslvpn-go sslvpn license-info 取机器码
 ./sslvpn license-gen -machine 908B-ADFD-D055-BFC0 -company "某某科技有限公司" -days 365
 
 # 自检 / 固定到期日 / 指定台数 / 限制用户数
@@ -157,16 +157,16 @@ Web 端只负责检测版本、展示更新说明、记录用户确认与展示�
 ### 一次性部署（每个服务器一次）
 
 ```bash
-# ① 部署含本功能的版本包（顶层目录 sslvpn-go/，原地覆盖解压，目录名不能变）
-cd /opt && tar -xzf /opt/sslvpn-go/sslvpn-go-v1.2.2.tar.gz -C /opt
-cd /opt/sslvpn-go && docker compose up -d --build
+# ① 部署含本功能的版本包（顶层目录 ks-sslvpn-go/，原地覆盖解压，目录名不能变）
+cd /opt && tar -xzf /opt/ks-sslvpn-go/ks-sslvpn-go-v1.2.4.tar.gz -C /opt
+cd /opt/ks-sslvpn-go && docker compose up -d --build
 
 # ② 安装宿主机升级代理（systemd 常驻，自动拉起）
 bash deploy/install-upgrade-agent.sh
 
 # ③ 配置更新源：在 docker-compose.yml 的 environment 增加一行，然后重建容器
 #      - SSLVPN_UPDATE_URL=file:///var/lib/sslvpn/upgrade/version.json
-#    cd /opt/sslvpn-go && docker compose up -d
+#    cd /opt/ks-sslvpn-go && docker compose up -d
 #    （国内可把 version.json 放到 Gitee 仓库或自建站点，填 https:// 地址；
 #     例如 - SSLVPN_UPDATE_URL=https://gitee.com/KingStrongerGee/ssvpn/raw/main/version.json）
 
@@ -174,11 +174,11 @@ bash deploy/install-upgrade-agent.sh
 cp deploy/version.json.example /opt/sslvpn-upgrade/version.json
 #    编辑 version.json：把 sha256 换成实际包的 sha256，package 指向包路径
 mkdir -p /opt/sslvpn-upgrade/packages
-cp sslvpn-go-v1.2.2.tar.gz /opt/sslvpn-upgrade/packages/
+cp ks-sslvpn-go-v1.2.4.tar.gz /opt/sslvpn-upgrade/packages/
 ```
 
 代理会每 5 秒把宿主机 `/opt/sslvpn-upgrade/version.json` 同步进容器，供 `file://` 更新源读取；
-升级包请放在 `/opt/sslvpn-upgrade/packages/`（不要放在 `/opt/sslvpn-go/` 内，回滚时该目录会被整体改名保留）。
+升级包请放在 `/opt/sslvpn-upgrade/packages/`（不要放在 `/opt/ks-sslvpn-go/` 内，回滚时该目录会被整体改名保留）。
 
 `version.json` 字段：
 
@@ -204,7 +204,7 @@ cp sslvpn-go-v1.2.2.tar.gz /opt/sslvpn-upgrade/packages/
 升级解压后**保留现网 compose**，避免覆盖自定义配置；新包模板另存为 `compose.new.yml` 供对比。
 
 回滚会恢复源码、配置与两个卷，并用备份时的镜像直接启动（无需联网重新构建）；升级失败的现场目录
-保留为 `/opt/sslvpn-go.failed-<备份ID>` 便于排查。**回滚会把数据卷恢复到升级前，升级后新增的数据会丢失**。
+保留为 `/opt/ks-sslvpn-go.failed-<备份ID>` 便于排查。**回滚会把数据卷恢复到升级前，升级后新增的数据会丢失**。
 
 **备份清理（v1.2.3+）**：备份列表中**最近 2 份受保护**（可回滚、不可删除，保证随时有退路），
 更早的备份可在页面点「🗑 删除」释放磁盘；删除请求经容器校验后由代理执行，代理侧会再次校验
@@ -213,7 +213,7 @@ cp sslvpn-go-v1.2.2.tar.gz /opt/sslvpn-upgrade/packages/
 `/opt/sslvpn-upgrade/upgrade-agent.sh` 并重启 systemd 服务加载新逻辑。
 
 代理任何情况下都不会执行 `docker compose down -v` 或删除数据卷；升级/回滚都必须保持目录名
-`/opt/sslvpn-go` 不变，否则 compose 项目名变化会挂到空卷上（看起来像数据全部丢失）。
+`/opt/ks-sslvpn-go` 不变，否则 compose 项目名变化会挂到空卷上（看起来像数据全部丢失）。
 
 ### 安全与手工兜底
 
@@ -434,7 +434,7 @@ exe 图标、桌面快捷方式与托盘图标仍用「白色 KS＋黑色圆角�
 
 ## 扫码登录（飞书 / 钉钉 / 企业微信）
 
-内置飞书 / 钉钉 / 企业微信三种扫码登录渠道，全部由 `sslvpn-go` 单进程完成，
+内置飞书 / 钉钉 / 企业微信三种扫码登录渠道，全部由 `ks-sslvpn-go` 单进程完成，
 无需额外部署 Node 网关或 nginx 配置。
 
 **链路（三渠道通用）**
@@ -613,7 +613,7 @@ LDAP 按 `carLicense` 等属性匹配渠道 ID（兼容 `feishu_` 前缀写法�
 ## 目录结构
 
 ```
-sslvpn-go/
+ks-sslvpn-go/
 ├── docker-compose.yml        # NET_ADMIN + /dev/net/tun + ip_forward
 ├── Dockerfile                # 多阶段构建（golang:1.22 → debian:12 + openvpn）
 ├── deploy/entrypoint.sh      # tun 设备/路由转发/初始化/拉起实例
@@ -652,13 +652,13 @@ SMTP 没配、邮箱填错或收不到信时走方式二。
 
 ```bash
 # 1) 先看有哪些管理员（确认要重置的用户名，避免重置到普通运维账号）
-docker exec -it sslvpn-go sslvpn reset-admin -list
+docker exec -it ks-sslvpn-go sslvpn reset-admin -list
 
 # 2) 重置：不带参数 = 重置超级管理员并自动生成 16 位随机密码（终端会打印出来）
-docker exec -it sslvpn-go sslvpn reset-admin
+docker exec -it ks-sslvpn-go sslvpn reset-admin
 
 #    也可以指定用户名和密码（密码至少 8 位）
-docker exec -it sslvpn-go sslvpn reset-admin -u admin -p 'MyNewPass2026'
+docker exec -it ks-sslvpn-go sslvpn reset-admin -u admin -p 'MyNewPass2026'
 ```
 
 命令说明：
@@ -666,16 +666,16 @@ docker exec -it sslvpn-go sslvpn reset-admin -u admin -p 'MyNewPass2026'
 - 直接改 `/var/lib/sslvpn/sslvpn.db`，不经过 Web，**容器运行中也能用**（SQLite WAL 多进程安全）。
 - 重置时会顺手把该账号状态改回「启用」，并清掉它遗留的找回密码验证码。
 - 忘记用户名时先用 `-list`；若 `-list` 显示没有任何管理员，执行
-  `docker exec -it sslvpn-go sslvpn init` 会重建默认账号 `admin / ChangeMe`（已有管理员时不会覆盖）。
+  `docker exec -it ks-sslvpn-go sslvpn init` 会重建默认账号 `admin / ChangeMe`（已有管理员时不会覆盖）。
 
 **重置后还登不上？两个常见原因**
 
 ```bash
 # ① 该 IP 连续输错 10 次被锁 10 分钟；重启容器立即解锁（同时让已登录会话全部失效）
-docker restart sslvpn-go
+docker restart ks-sslvpn-go
 
 # ② 容器起不来、exec 不进去时，用一次性容器改卷里的库（镜像名与卷名取自现有容器，避免猜错）
-IMG=$(docker inspect -f '{{.Config.Image}}' sslvpn-go)
+IMG=$(docker inspect -f '{{.Config.Image}}' ks-sslvpn-go)
 docker run --rm -it -v "$(docker volume ls --format '{{.Name}}' | grep sslvpn-data | head -1)":/var/lib/sslvpn \
   --entrypoint sslvpn "$IMG" reset-admin
 ```
@@ -760,14 +760,14 @@ KSVPN 以源码公开（Source Available）方式发布，长期维护需要持�
 
 ```bash
 # 国内（推荐）
-git clone https://gitee.com/KingStrongerGee/ssvpn.git sslvpn-go
-cd sslvpn-go && docker compose up -d --build
+git clone https://gitee.com/KingStrongerGee/ssvpn.git ks-sslvpn-go
+cd ks-sslvpn-go && docker compose up -d --build
 
 # 或 GitHub
-git clone https://github.com/kingstronger-ai/ssvpn.git sslvpn-go
+git clone https://github.com/kingstronger-ai/ssvpn.git ks-sslvpn-go
 ```
 
-> 克隆时务必把目录命名为 `sslvpn-go`：目录名决定 Docker Compose 项目名，进而决定挂载哪一组
+> 克隆时务必把目录命名为 `ks-sslvpn-go`：目录名决定 Docker Compose 项目名，进而决定挂载哪一组
 > 数据卷；改名会挂到空卷，看起来像「数据全丢了」。
 > Git 仓库不含 `deploy/downloads/` 下的桌面客户端安装包（体积较大，已被 `.gitignore` 排除），
 > 完整交付请使用 Releases 的 tar.gz / zip 离线包，或在后台上传客户端包（会落入数据卷，重建不丢）。

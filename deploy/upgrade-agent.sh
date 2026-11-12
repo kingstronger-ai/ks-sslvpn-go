@@ -10,8 +10,8 @@
 # 任何情况下都不执行 docker compose down -v / docker volume rm。
 set -u
 
-APP_DIR="${APP_DIR:-/opt/sslvpn-go}"
-CONTAINER="${CONTAINER:-sslvpn-go}"
+APP_DIR="${APP_DIR:-/opt/ks-sslvpn-go}"
+CONTAINER="${CONTAINER:-ks-sslvpn-go}"
 WORK="${WORK:-/opt/sslvpn-upgrade}"
 VOL_DIR="/var/lib/sslvpn/upgrade"
 HEALTH_URL="${HEALTH_URL:-https://127.0.0.1:58443/healthz}"
@@ -127,7 +127,8 @@ do_backup() {
 
   img="$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null || true)"
   if [ -n "$img" ]; then
-    docker tag "$img" "sslvpn-go:rollback-$bid" >/dev/null 2>&1 || true
+    img_repo="${img%%@*}"; img_repo="${img_repo%%:*}"
+    docker tag "$img" "${img_repo}:rollback-$bid" >/dev/null 2>&1 || true
     echo "$img" > "$bk/image.txt"
   fi
 
@@ -160,7 +161,7 @@ do_rollback() {
   logline "开始回滚到备份 $bid（版本 $oldver）"
 
   (cd "$APP_DIR" && docker compose stop) >/dev/null 2>&1 || true
-  # 目录改名保留失败现场；新解压出的目录仍叫 sslvpn-go，compose 项目名/卷归属不变
+  # 目录改名保留失败现场；新解压出的目录仍叫 ks-sslvpn-go，compose 项目名/卷归属不变
   mv "$APP_DIR" "$APP_DIR.failed-$bid" || { logline "保留失败现场失败"; return 1; }
   tar -xzf "$bk/src.tar.gz" -C "$(dirname "$APP_DIR")" || { logline "恢复源码失败"; return 1; }
   cp -a "$bk/docker-compose.yml" "$APP_DIR/docker-compose.yml"
@@ -168,8 +169,10 @@ do_rollback() {
   if ! restore_volumes "$bk"; then
     logline "警告：数据卷恢复有错误，请检查 $WORK/upgrade.log"
   fi
-  if [ -f "$bk/image.txt" ] && docker image inspect "sslvpn-go:rollback-$bid" >/dev/null 2>&1; then
-    docker tag "sslvpn-go:rollback-$bid" "$(cat "$bk/image.txt")" >/dev/null 2>&1 || true
+  img_repo="$(cat "$bk/image.txt" 2>/dev/null || true)"
+  img_repo="${img_repo%%@*}"; img_repo="${img_repo%%:*}"
+  if [ -f "$bk/image.txt" ] && docker image inspect "${img_repo}:rollback-$bid" >/dev/null 2>&1; then
+    docker tag "${img_repo}:rollback-$bid" "$(cat "$bk/image.txt")" >/dev/null 2>&1 || true
     (cd "$APP_DIR" && docker compose up -d) > "$WORK/rollback.log" 2>&1
   else
     (cd "$APP_DIR" && docker compose up -d --build) > "$WORK/rollback.log" 2>&1
