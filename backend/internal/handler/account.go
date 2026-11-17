@@ -598,6 +598,55 @@ func AccountBatchDelete(w http.ResponseWriter, r *http.Request) {
 	util.OK(w, map[string]int{"deleted": n})
 }
 
+// AccountBatchSetExpire POST /account/batchSetExpire
+// 批量设置 VPN 账号到期时间（多选统一配置）。
+// 覆盖本地密码 / TOTP / LDAP(AD 导入) 等所有账号类型：到期字段统一存于 account.expire_date，
+// VPN 认证层 authverify.go 按该字段统一拦截过期账号，故一个 UPDATE 即可全覆盖。
+// expire_date：YYYY-MM-DD；空字符串 = 永久（不过期）。不改变账号启用状态。
+func AccountBatchSetExpire(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs        []int64 `json:"ids"`
+		ExpireDate string  `json:"expire_date"`
+	}
+	if err := util.ReadJSON(r, &req); err != nil || len(req.IDs) == 0 {
+		util.Fail(w, "请先选择要设置的账号")
+		return
+	}
+	if len(req.IDs) > 5000 {
+		util.Fail(w, "单次最多设置 5000 个账号")
+		return
+	}
+	exp := strings.TrimSpace(req.ExpireDate)
+	if exp != "" {
+		t, e := time.Parse("2006-01-02", exp)
+		if e != nil {
+			util.Fail(w, "到期日期格式错误，应为 YYYY-MM-DD")
+			return
+		}
+		exp = t.Format("2006-01-02")
+	}
+	seen := map[int64]bool{}
+	n := 0
+	for _, id := range req.IDs {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		res, err := db.DB.Exec(`UPDATE account SET expire_date=? WHERE id=?`, exp, id)
+		if err == nil {
+			if c, _ := res.RowsAffected(); c > 0 {
+				n++
+			}
+		}
+	}
+	expDesc := exp
+	if expDesc == "" {
+		expDesc = "永久"
+	}
+	db.Syslog("admin", "批量设置到期时间", fmt.Sprintf("到期=%s 账号数=%d", expDesc, n), clientIP(r))
+	util.OK(w, map[string]any{"updated": n, "expire_date": exp})
+}
+
 func StartQueue(w http.ResponseWriter, r *http.Request) {
 	PollingTask(w, r)
 }

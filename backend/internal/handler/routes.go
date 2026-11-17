@@ -68,6 +68,7 @@ func init() {
 	reg("GET", "/account/disableVpnServer", true, DisableVPNServer)
 	reg("POST", "/account/batchUpload", true, AccountBatchUpload)
 	reg("POST", "/account/batchDelete", true, AccountBatchDelete)
+	reg("POST", "/account/batchSetExpire", true, AccountBatchSetExpire)
 	reg("GET", "/account/startThinkPHPQueue", true, StartQueue)
 	reg("POST", "/account/downloadUserCfg", true, DownloadUserCfg)
 	reg("POST", "/account/rebuild", true, RebuildUserCfg)

@@ -407,6 +407,7 @@ async function pageUsers(main) {
     <div class="topbar"><h3 style="margin:0">👤 VPN 用户列表</h3>
       <div class="inline">
         <button class="primary" ${full ? 'disabled style="opacity:.55;cursor:not-allowed" title="已达授权用户数上限"' : 'onclick="userAddModal()"'}>＋ 添加用户</button>
+        <button class="ghost" onclick="userBatchExpireModal()">🗓 批量设置到期时间</button>
         <button class="ghost" onclick="window.open(API_BASE + '/account/exportDatabase')">📤 导出用户数据表格</button>
         <button class="ghost" onclick="enter('users')">⟳ 刷新</button>
       </div></div>
@@ -415,6 +416,7 @@ async function pageUsers(main) {
       <input id="uKw" placeholder="请输入 VPN 用户名" value="${esc(kw)}" style="width:220px"
         onkeydown="if(event.key==='Enter')enter('users')">
       <button class="primary" onclick="enter('users')">🔍 搜索</button>
+      <span class="muted" id="uListSelTip" style="margin-left:6px;font-size:12px">未选择账号（勾选左侧复选框可多选，批量设置到期时间）</span>
     </div>
     <p class="muted" style="margin:-4px 0 12px">客户端登录请使用「VPN用户名」列的值；「联系邮箱」只用于接收账号邮件，<b>不是登录账号</b>。若需以邮箱登录，请在「LDAP 用户同步」把搜索过滤器改为 <code>(mail=%s)</code> 后重新同步用户。</p>
     <div id="userTable">${loading}</div></div>`;
@@ -422,6 +424,7 @@ async function pageUsers(main) {
   const list = d.data.list || [];
   const authName = { local: "本地密码", totp: "TOTP 动态码", ldap: "LDAP存储", feishu: "扫码登录", sso: "扫码登录", dingtalk: "扫码登录", wecom: "扫码登录" };
   const rows = list.map(a => `<tr>
+    <td><input type="checkbox" class="uChk" value="${a.id}" onchange="userSelChanged()"></td>
     <td>${esc(a.username)}</td>
     <td>${esc(a.password === "-" ? "•••••" : a.password)}</td>
     <td>${esc(a.email || "-")}</td>
@@ -442,8 +445,53 @@ async function pageUsers(main) {
       <a href="javascript:;" class="lk r" onclick="userDel(${a.id},'${esc(a.username)}')">删除</a>
     </td></tr>`).join("");
   document.getElementById("userTable").innerHTML = list.length ? `<table>
-    <tr><th>VPN用户名</th><th>密码</th><th>联系邮箱<br><span class="muted" style="font-weight:normal">仅发邮件用</span></th><th>在线状态</th><th>客户端IP</th><th>用户状态</th><th>认证类型</th><th>所属分组</th><th>过期时间</th><th>创建时间</th><th>功能操作</th></tr>${rows}</table>`
+    <tr><th><input type="checkbox" id="uSelAll" onchange="userToggleAll(this)" title="全选/取消"></th><th>VPN用户名</th><th>密码</th><th>联系邮箱<br><span class="muted" style="font-weight:normal">仅发邮件用</span></th><th>在线状态</th><th>客户端IP</th><th>用户状态</th><th>认证类型</th><th>所属分组</th><th>过期时间</th><th>创建时间</th><th>功能操作</th></tr>${rows}</table>`
     : `<p class="muted" style="text-align:center;padding:30px 0">暂无用户，点击右上角"添加用户"创建，或从 LDAP配置 → 同步用户 导入</p>`;
+}
+/* ---- 用户列表多选 + 批量设置到期时间 ---- */
+function userToggleAll(box) {
+  document.querySelectorAll(".uChk").forEach(c => { c.checked = box.checked; });
+  userSelChanged();
+}
+function userSelChanged() {
+  const all = document.querySelectorAll(".uChk").length;
+  const sel = document.querySelectorAll(".uChk:checked").length;
+  const box = document.getElementById("uSelAll");
+  if (box) box.checked = all > 0 && sel === all;
+  const tip = document.getElementById("uListSelTip");
+  if (tip) tip.textContent = sel > 0 ? `已选 ${sel} 个账号` : "未选择账号（勾选左侧复选框可多选，批量设置到期时间）";
+}
+function userSelectedIds() {
+  return [...document.querySelectorAll(".uChk:checked")].map(x => Number(x.value));
+}
+/* 相对天数 -> YYYY-MM-DD（本地日期） */
+function expireAfterDays(n) {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  const p = x => String(x).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function userBatchExpireModal() {
+  const ids = userSelectedIds();
+  if (!ids.length) { toast("请先勾选要设置到期时间的账号", false); return; }
+  formModal(`批量设置到期时间（已选 ${ids.length} 个账号）`, `
+    <div class="tip-banner" style="font-size:13px">统一覆盖所选账号的到期日期，适用于本地 / TOTP / LDAP(AD 导入) 等全部账号类型。设置为<b>永久</b>即清空到期时间。</div>
+    <div class="form-row"><label>到期日期</label><input id="beDate" type="date"></div>
+    <div class="form-row"><label>快捷选择</label>
+      <div class="inline" style="flex-wrap:wrap;gap:6px">
+        <button type="button" class="ghost small" onclick="document.getElementById('beDate').value='${expireAfterDays(7)}'">7 天后</button>
+        <button type="button" class="ghost small" onclick="document.getElementById('beDate').value='${expireAfterDays(30)}'">30 天后</button>
+        <button type="button" class="ghost small" onclick="document.getElementById('beDate').value='${expireAfterDays(90)}'">90 天后</button>
+        <button type="button" class="ghost small" onclick="document.getElementById('beDate').value='${expireAfterDays(180)}'">180 天后</button>
+        <button type="button" class="ghost small" onclick="document.getElementById('beDate').value=''">永久</button>
+      </div></div>
+    <p class="muted" id="uBatchTip" style="font-size:12px;margin:6px 0 0">已选 ${ids.length} 个账号</p>`,
+    async () => {
+      const r = await api("/account/batchSetExpire", { body: { ids, expire_date: fv("beDate") } });
+      if (r.code !== 1) throw new Error(r.msg);
+      toast(`已设置 ${r.data.updated} 个账号的到期时间`);
+      enter("users");
+    }, { okText: "批量设置" });
 }
 /* 生成强随机密码（与服务端 util.RandomPassword 规则一致：大小写+数字，排除易混淆字符） */
 function genStrongPwd(n = 12) {
