@@ -1,8 +1,8 @@
 {
-  "version": "1.2.5",
-  "released_at": "2026-11-17",
-  "notes": "KSVPN v1.2.5：VPN 用户列表新增多选批量设置到期时间（固定日期 / 7·30·90·180 天快捷 / 永久清空），本地密码、TOTP 动态码、LDAP 同步导入账号统一支持；新增接口 POST /account/batchSetExpire（含日期校验、单次 5000 上限、审计日志）。其余能力同 v1.2.4（ks-sslvpn-go 命名统一、备份删除、代理自更新、许可 -max-users 用户数上限等）。",
-  "package": "https://gitee.com/KingStrongerGee/ks-sslvpn-go/releases/download/v1.2.5/ks-sslvpn-go-v1.2.5.tar.gz",
-  "sha256": "21e249584f5cf47aae24c606fa01d101ce1979ec06a0bdbc884dc40701d7e028",
+  "version": "1.2.6",
+  "released_at": "2026-11-18",
+  "notes": "KSVPN v1.2.6：LDAP 账号停用自动禁用本地 VPN 账号（双向同步 + 认证实时拦截）。支持 go-ldap-admin 删号式、OpenLDAP 保留账号属性标记、Windows AD 域（UAC 禁用位/账号过期/锁定/msDS-UserAccountDisabled）三类目录；同步时 LDAP 停用→本地禁用、恢复→本地启用；大域分页（突破 AD 1000 条上限）与复合过滤器属性解析；新增可选「停用账号过滤器」兜底。其余能力同 v1.2.5（用户列表多选批量设置到期时间、ks-sslvpn-go 命名统一、在线升级与回滚等）。",
+  "package": "https://gitee.com/KingStrongerGee/ks-sslvpn-go/releases/download/v1.2.6/ks-sslvpn-go-v1.2.6.tar.gz",
+  "sha256": "eb11b361d2cd1bf74d42894cd4c0ec2afe18e3a4012b54a94b6f0412d0313f78",
   "min_version": "1.2.0"
 }

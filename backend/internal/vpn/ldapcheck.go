@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	goldap "github.com/go-ldap/ldap/v3"
+
+	"sslvpn/internal/ldaputil"
 )
 
 // LDAPBindCheck 从数据库读取 LDAP 配置并校验用户名密码
@@ -21,9 +23,9 @@ func LDAPBindCheck(username, password string) bool {
 
 	var server string
 	var port int
-	var bindDN, bindPass, baseDN, ou, filter string
-	err = d.QueryRow(`SELECT server,port,bind_dn,bind_pass,base_dn,ou,filter FROM ldap_conf WHERE id=1`).
-		Scan(&server, &port, &bindDN, &bindPass, &baseDN, &ou, &filter)
+	var bindDN, bindPass, baseDN, ou, filter, disabledFilter string
+	err = d.QueryRow(`SELECT server,port,bind_dn,bind_pass,base_dn,ou,filter,disabled_filter FROM ldap_conf WHERE id=1`).
+		Scan(&server, &port, &bindDN, &bindPass, &baseDN, &ou, &filter, &disabledFilter)
 	if err != nil || server == "" {
 		return false
 	}
@@ -52,16 +54,35 @@ func LDAPBindCheck(username, password string) bool {
 		searchBase = fmt.Sprintf("ou=%s,%s", ou, baseDN)
 	}
 	f := strings.ReplaceAll(filter, "%s", username)
+	attrs := append([]string{"dn"}, ldaputil.DisabledAttrs...)
 	req := goldap.NewSearchRequest(searchBase, goldap.ScopeWholeSubtree, goldap.NeverDerefAliases,
-		1, 10, false, f, []string{"dn"}, nil)
+		1, 10, false, f, attrs, nil)
 	res, err := conn.Search(req)
 	if err != nil || len(res.Entries) == 0 {
 		if res, err = conn.Search(goldap.NewSearchRequest(baseDN, goldap.ScopeWholeSubtree,
-			goldap.NeverDerefAliases, 1, 10, false, f, []string{"dn"}, nil)); err != nil || len(res.Entries) == 0 {
-			return false
+			goldap.NeverDerefAliases, 1, 10, false, f, attrs, nil)); err != nil || len(res.Entries) == 0 {
+			return false // 删除型停用：LDAP 里已无此账号，搜不到 DN 直接拒绝
 		}
 	}
-	return conn.Bind(res.Entries[0].DN, password) == nil
+	entry := res.Entries[0]
+	// 保留账号型停用：账号仍在目录里但被标记停用，bind 前主动拦截
+	// （AD 的 UAC 禁用位/账号过期/锁定、ppolicy 锁定等，统一判定）。
+	if ldaputil.EntryDisabled(entry) {
+		return false
+	}
+	if strings.TrimSpace(disabledFilter) != "" {
+		// 自定义停用过滤器：用该过滤器查命中 DN 集合，命中当前用户 DN 即拒绝。
+		// 失败时放行（避免因过滤器语法问题误拒所有 LDAP 登录），由同步侧继续维护状态。
+		if dre, derr := conn.Search(goldap.NewSearchRequest(searchBase, goldap.ScopeWholeSubtree,
+			goldap.NeverDerefAliases, 0, 10, false, disabledFilter, []string{"dn"}, nil)); derr == nil {
+			for _, de := range dre.Entries {
+				if strings.EqualFold(de.DN, entry.DN) {
+					return false
+				}
+			}
+		}
+	}
+	return conn.Bind(entry.DN, password) == nil
 }
 
 // normalizeLDAPAddr 规范化 LDAP 地址：去掉 scheme / 尾部斜杠 / 内嵌端口，返回纯主机名。

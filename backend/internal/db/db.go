@@ -172,7 +172,8 @@ func migrate() error {
 			base_dn TEXT DEFAULT '',
 			ou TEXT DEFAULT '',
 			filter TEXT DEFAULT '(uid=%s)',
-			enabled INTEGER DEFAULT 0)`,
+			enabled INTEGER DEFAULT 0,
+			disabled_filter TEXT DEFAULT '')`,
 		// 备份记录
 		`CREATE TABLE IF NOT EXISTS backup(
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -238,6 +239,8 @@ func migrate() error {
 		{"sso_device", "profile_sent", "INTEGER DEFAULT 0"},
 		// 登录别名：短账号与 UPN/DN 无字符串对应关系，必须由管理员显式配置
 		{"account", "login_aliases", "TEXT DEFAULT ''"},
+		// LDAP 停用账号判定过滤器（保留账号、用属性标记停用的 OpenLDAP 需要）
+		{"ldap_conf", "disabled_filter", "TEXT DEFAULT ''"},
 	} {
 		if err := ensureColumn(c[0], c[1], c[2]); err != nil {
 			return err

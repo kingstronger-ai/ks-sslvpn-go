@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	goldap "github.com/go-ldap/ldap/v3"
+
+	"sslvpn/internal/ldaputil"
 )
 
 func tlsCfg() *tls.Config {
@@ -16,15 +18,16 @@ func tlsCfg() *tls.Config {
 }
 
 type ldapClient struct {
-	conn     *goldap.Conn
-	baseDN   string
-	ou       string
-	filter   string
-	bindDN   string
-	bindPass string
+	conn           *goldap.Conn
+	baseDN         string
+	ou             string
+	filter         string
+	bindDN         string
+	bindPass       string
+	disabledFilter string // 可选：命中该过滤器的 LDAP 账号视为停用（保留账号式 OpenLDAP）
 }
 
-func newLDAPClient(server string, port int, bindDN, bindPass, baseDN, ou, filter string) (ldapClient, error) {
+func newLDAPClient(server string, port int, bindDN, bindPass, baseDN, ou, filter, disabledFilter string) (ldapClient, error) {
 	scheme := "ldap://"
 	if port == 636 {
 		scheme = "ldaps://"
@@ -56,7 +59,7 @@ func newLDAPClient(server string, port int, bindDN, bindPass, baseDN, ou, filter
 		conn.Close()
 		return ldapClient{}, fmt.Errorf("管理员绑定失败: %s", err.Error())
 	}
-	return ldapClient{conn: conn, baseDN: baseDN, ou: ou, filter: filter, bindDN: bindDN, bindPass: bindPass}, nil
+	return ldapClient{conn: conn, baseDN: baseDN, ou: ou, filter: filter, bindDN: bindDN, bindPass: bindPass, disabledFilter: disabledFilter}, nil
 }
 
 func (c *ldapClient) Close() { c.conn.Close() }
@@ -85,6 +88,10 @@ func (c *ldapClient) BindCheck(username, password string) error {
 		}
 	}
 	userDN := res.Entries[0].DN
+	// AD 保留账号式停用：bind 前检查属性标记（UAC 禁用位/账号过期/锁定等），命中直接拒绝。
+	if ldaputil.EntryDisabled(res.Entries[0]) {
+		return fmt.Errorf("账号已被停用")
+	}
 	return c.conn.Bind(userDN, password)
 }
 
@@ -134,23 +141,46 @@ type LdapUser struct {
 	Username    string `json:"username"`
 	DisplayName string `json:"display_name"`
 	Email       string `json:"email"`
+	Disabled    bool   `json:"disabled"` // LDAP 侧被标记为停用（存在但禁用）
 }
 
-// ListUsersDetail 列出用户明细（uid + cn/sn + mail）
+// searchAll 用分页搜索突破 AD 默认 1000 条上限；普通 LDAP 亦兼容。
+func (c *ldapClient) searchAll(req *goldap.SearchRequest) (*goldap.SearchResult, error) {
+	return c.conn.SearchWithPaging(req, 500)
+}
+
+// ldapEntryDisabled 保留薄包装（包内测试与历史调用沿用），判定统一走 ldaputil。
+func ldapEntryDisabled(e *goldap.Entry) bool { return ldaputil.EntryDisabled(e) }
+
+// ListUsersDetail 列出用户明细（用户名 + cn/sn + mail + 停用状态）
 func (c *ldapClient) ListUsersDetail() ([]LdapUser, error) {
-	attr := "uid"
-	f := c.filter
-	if i := strings.Index(f, "="); i > 0 && strings.HasPrefix(strings.TrimSpace(f), "(") {
-		if k := strings.TrimLeft(strings.Split(f, "=")[0], "(%"); k != "" && k != "uid" {
-			attr = strings.TrimPrefix(k, "uid")
-		}
-	}
+	attr := ldaputil.UsernameAttr(c.filter)
+	attrs := append([]string{attr, "cn", "sn", "mail", "sAMAccountName", "userPrincipalName"}, ldaputil.DisabledAttrs...)
 	req := goldap.NewSearchRequest(c.searchBase(), goldap.ScopeWholeSubtree, goldap.NeverDerefAliases,
-		0, 0, false, "("+attr+"=*)", []string{attr, "cn", "sn", "mail"}, nil)
-	res, err := c.conn.Search(req)
+		0, 0, false, "("+attr+"=*)", attrs, nil)
+	res, err := c.searchAll(req)
 	if err != nil {
 		return nil, err
 	}
+
+	// 自定义停用过滤器：命中该过滤器的账号用户名集合（保留账号式 OpenLDAP/AD 的兜底判定）。
+	// 查询失败不阻断主流程；返回属性按所有常见身份字段收集，与主列表用户名比对。
+	customDisabled := map[string]bool{}
+	if strings.TrimSpace(c.disabledFilter) != "" {
+		dreq := goldap.NewSearchRequest(c.searchBase(), goldap.ScopeWholeSubtree,
+			goldap.NeverDerefAliases, 0, 0, false, c.disabledFilter,
+			[]string{"uid", "cn", "sn", "mail", "sAMAccountName", "userPrincipalName"}, nil)
+		if dre, derr := c.searchAll(dreq); derr == nil {
+			for _, de := range dre.Entries {
+				for _, k := range []string{"uid", "sAMAccountName", "userPrincipalName", "mail", "cn", "sn"} {
+					if v := de.GetAttributeValue(k); v != "" {
+						customDisabled[strings.ToLower(v)] = true
+					}
+				}
+			}
+		}
+	}
+
 	var users []LdapUser
 	for _, e := range res.Entries {
 		u := e.GetAttributeValue(attr)
@@ -161,23 +191,22 @@ func (c *ldapClient) ListUsersDetail() ([]LdapUser, error) {
 		if dn == "" {
 			dn = e.GetAttributeValue("sn")
 		}
-		users = append(users, LdapUser{Username: u, DisplayName: dn, Email: e.GetAttributeValue("mail")})
+		users = append(users, LdapUser{
+			Username: u, DisplayName: dn, Email: e.GetAttributeValue("mail"),
+			Disabled: ldaputil.EntryDisabled(e) || customDisabled[strings.ToLower(u)] ||
+				customDisabled[strings.ToLower(e.GetAttributeValue("sAMAccountName"))] ||
+				customDisabled[strings.ToLower(e.GetAttributeValue("userPrincipalName"))],
+		})
 	}
 	return users, nil
 }
 
-// ListUsers 列出用户 uid
+// ListUsers 列出用户用户名
 func (c *ldapClient) ListUsers() ([]string, error) {
-	attr := "uid"
-	f := c.filter
-	if i := strings.Index(f, "="); i > 0 && strings.HasPrefix(strings.TrimSpace(f), "(") {
-		if k := strings.TrimLeft(strings.Split(f, "=")[0], "(%"); k != "" && k != "uid" {
-			attr = strings.TrimPrefix(k, "uid")
-		}
-	}
+	attr := ldaputil.UsernameAttr(c.filter)
 	req := goldap.NewSearchRequest(c.searchBase(), goldap.ScopeWholeSubtree, goldap.NeverDerefAliases,
 		0, 0, false, "("+attr+"=*)", []string{attr}, nil)
-	res, err := c.conn.Search(req)
+	res, err := c.searchAll(req)
 	if err != nil {
 		return nil, err
 	}

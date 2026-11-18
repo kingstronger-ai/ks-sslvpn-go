@@ -821,6 +821,14 @@ async function pageLdap(main) {
         <button class="ghost" onclick="document.getElementById('ldFilter').value='(userPrincipalName=%s)'">UPN 账号</button>
       </div>
     </div></div>
+    <div class="form-row"><label>停用账号过滤器 <span class="hint">可选</span></label><div>
+      <input id="ldDisabledFilter" value="${esc(c.disabled_filter || "")}" placeholder="例如 (userAccountControl=514)">
+      <div class="muted" style="margin-top:4px">适配「账号仍保留在目录、用属性标记停用」的目录。主流场景已内置自动识别，通常留空即可：<br>
+      · <b>Windows AD 域</b>：自动识别 UAC 禁用位（514 等）、账号过期（accountExpires）、锁定（lockoutTime / UAC 锁定位）、msDS-UserAccountDisabled，无需填写。<br>
+      · <b>OpenLDAP ppolicy</b>：pwdAccountLockedTime；<b>389DS</b>：nsAccountLock；<b>go-ldap-admin</b>：禁用即删号，靠"账号是否还在目录"判定。<br>
+      若目录用了自定义标记，可填一个 LDAP 过滤器，命中它的账号同步时自动禁用、登录时也会被拒绝。<br>
+      示例：<code>(employeeStatus=disabled)</code> 自定义属性 · <code>(pwdAccountLockedTime=*)</code> ppolicy 锁定 · <code>(nsAccountLock=TRUE)</code> 389DS。</div>
+    </div></div>
     <div class="form-row"><label></label><div class="inline">
       <button class="primary" onclick="ldapSave()">✓ 更新</button>
       <button class="green" onclick="ldapTest()">🔗 测试连接</button>
@@ -862,11 +870,11 @@ async function loginAliasSave() {
 async function ldapSave() {
   const r = await api("/ldap/update", { body: { server: fv("ldServer"), port: +fv("ldPort"),
     bind_dn: fv("ldBind"), bind_pass: fv("ldPass"), base_dn: fv("ldBase"),
-    ou: fv("ldOU"), filter: fv("ldFilter"), enabled: 1 } });
+    ou: fv("ldOU"), filter: fv("ldFilter"), disabled_filter: fv("ldDisabledFilter"), enabled: 1 } });
   toast(r.msg, r.code === 1);
 }
 function ldapClear() {
-  ["ldServer", "ldBase", "ldBind", "ldPass", "ldOU"].forEach(id => { const el = document.getElementById(id); if (el) el.value = ""; });
+  ["ldServer", "ldBase", "ldBind", "ldPass", "ldOU", "ldDisabledFilter"].forEach(id => { const el = document.getElementById(id); if (el) el.value = ""; });
   const f = document.getElementById("ldFilter"); if (f) f.value = "(uid=%s)";
   toast("已清空表单（未保存）");
 }
@@ -883,7 +891,7 @@ async function ldapSyncDialog() {
   closeModal("mLdapSync");
   $app.insertAdjacentHTML("beforeend", `<div class="modal-mask" id="mLdapSync"><div class="modal ldap-dialog">
     <h3>目录用户列表</h3>
-    <div class="tip-banner">ⓘ 提示：不再显示已经存在的用户，包括已禁用的，以用户名为准。</div>
+    <div class="tip-banner">ⓘ 提示：不再显示已经存在的用户，包括已禁用的，以用户名为准。导入时会以 LDAP 为准自动校正状态：LDAP 已停用/删除的账号自动禁用，恢复的自动启用（不影响本地密码 / TOTP 账号）。</div>
     <div class="ldap-pick">👥 选择分组 <select id="lsGrp" style="width:200px">${groupOpts}</select>
       <input id="lsKw" placeholder="过滤用户名" style="width:160px;margin-left:10px" oninput="ldapRenderRows()"></div>
     <div id="lsTable">${loading}</div>
@@ -949,7 +957,11 @@ async function ldapDoImport(all) {
   const r = await api("/ldap/import", { body: { usernames, group_id: +fv("lsGrp") || 0 } });
   if (r.code !== 1) return toast(r.msg, false);
   const quotaFull = Number(r.data.quota_full || 0);
-  toast(`导入完成：新增 ${r.data.added}，跳过 ${r.data.skipped}${quotaFull ? `，${quotaFull} 人因授权用户数上限被拒绝` : ""}`, quotaFull === 0);
+  const disabled = Number(r.data.disabled || 0), enabled = Number(r.data.enabled || 0);
+  const stat = [];
+  if (disabled) stat.push(`自动禁用 ${disabled} 个（LDAP 已停用/删除）`);
+  if (enabled) stat.push(`恢复启用 ${enabled} 个`);
+  toast(`导入完成：新增 ${r.data.added}，跳过 ${r.data.skipped}${quotaFull ? `，${quotaFull} 人因授权用户数上限被拒绝` : ""}${stat.length ? "；" + stat.join("，") : ""}`, true);
   closeModal("mLdapSync");
   enter("users");
 }

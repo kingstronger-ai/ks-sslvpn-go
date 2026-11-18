@@ -602,10 +602,11 @@ func LdapGet(w http.ResponseWriter, r *http.Request) {
 		Filter   string
 		Enabled  int
 	}
-	err := db.DB.QueryRow(`SELECT server,port,bind_dn,bind_pass,base_dn,ou,filter,enabled FROM ldap_conf WHERE id=1`).
-		Scan(&row.Server, &row.Port, &row.BindDN, &row.BindPass, &row.BaseDN, &row.OU, &row.Filter, &row.Enabled)
+	var disabledFilter string
+	err := db.DB.QueryRow(`SELECT server,port,bind_dn,bind_pass,base_dn,ou,filter,enabled,disabled_filter FROM ldap_conf WHERE id=1`).
+		Scan(&row.Server, &row.Port, &row.BindDN, &row.BindPass, &row.BaseDN, &row.OU, &row.Filter, &row.Enabled, &disabledFilter)
 	if err == sql.ErrNoRows {
-		util.OK(w, map[string]any{"enabled": 0, "filter": "(uid=%s)", "port": 389})
+		util.OK(w, map[string]any{"enabled": 0, "filter": "(uid=%s)", "port": 389, "disabled_filter": ""})
 		return
 	}
 	if err != nil {
@@ -615,6 +616,7 @@ func LdapGet(w http.ResponseWriter, r *http.Request) {
 	util.OK(w, map[string]any{
 		"server": row.Server, "port": row.Port, "bind_dn": row.BindDN, "bind_pass": row.BindPass,
 		"base_dn": row.BaseDN, "ou": row.OU, "filter": row.Filter, "enabled": row.Enabled,
+		"disabled_filter": disabledFilter,
 	})
 }
 
@@ -627,9 +629,10 @@ func LdapUpdate(w http.ResponseWriter, r *http.Request) {
 		BindDN   string `json:"bind_dn"`
 		BindPass string `json:"bind_pass"`
 		BaseDN   string `json:"base_dn"`
-		OU       string `json:"ou"`
-		Filter   string `json:"filter"`
-		Enabled  int    `json:"enabled"`
+		OU             string `json:"ou"`
+		Filter         string `json:"filter"`
+		Enabled        int    `json:"enabled"`
+		DisabledFilter string `json:"disabled_filter"`
 	}
 	if err := util.ReadJSON(r, &req); err != nil {
 		util.Fail(w, "参数错误")
@@ -641,11 +644,12 @@ func LdapUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.Port == 0 {
 		req.Port = 389
 	}
-	if _, err := db.DB.Exec(`INSERT INTO ldap_conf(id,server,port,bind_dn,bind_pass,base_dn,ou,filter,enabled)
-		VALUES(1,?,?,?,?,?,?,?,?)
+	if _, err := db.DB.Exec(`INSERT INTO ldap_conf(id,server,port,bind_dn,bind_pass,base_dn,ou,filter,enabled,disabled_filter)
+		VALUES(1,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET server=excluded.server,port=excluded.port,bind_dn=excluded.bind_dn,
-		bind_pass=excluded.bind_pass,base_dn=excluded.base_dn,ou=excluded.ou,filter=excluded.filter,enabled=excluded.enabled`,
-		req.Server, req.Port, req.BindDN, req.BindPass, req.BaseDN, req.OU, req.Filter, req.Enabled); err != nil {
+		bind_pass=excluded.bind_pass,base_dn=excluded.base_dn,ou=excluded.ou,filter=excluded.filter,enabled=excluded.enabled,
+		disabled_filter=excluded.disabled_filter`,
+		req.Server, req.Port, req.BindDN, req.BindPass, req.BaseDN, req.OU, req.Filter, req.Enabled, req.DisabledFilter); err != nil {
 		util.Fail(w, "保存失败")
 		return
 	}
@@ -656,16 +660,16 @@ func LdapUpdate(w http.ResponseWriter, r *http.Request) {
 func ldapConnect() (ldapClient, error) {
 	var server string
 	var port int
-	var bindDN, bindPass, baseDN, ou, filter string
-	err := db.DB.QueryRow(`SELECT server,port,bind_dn,bind_pass,base_dn,ou,filter FROM ldap_conf WHERE id=1`).
-		Scan(&server, &port, &bindDN, &bindPass, &baseDN, &ou, &filter)
+	var bindDN, bindPass, baseDN, ou, filter, disabledFilter string
+	err := db.DB.QueryRow(`SELECT server,port,bind_dn,bind_pass,base_dn,ou,filter,disabled_filter FROM ldap_conf WHERE id=1`).
+		Scan(&server, &port, &bindDN, &bindPass, &baseDN, &ou, &filter, &disabledFilter)
 	if err != nil {
 		return ldapClient{}, fmt.Errorf("LDAP 未配置")
 	}
 	if filter == "" {
 		filter = "(uid=%s)"
 	}
-	return newLDAPClient(server, port, bindDN, bindPass, baseDN, ou, filter)
+	return newLDAPClient(server, port, bindDN, bindPass, baseDN, ou, filter, disabledFilter)
 }
 
 func LdapTest(w http.ResponseWriter, r *http.Request) {
@@ -690,6 +694,63 @@ func LdapTest(w http.ResponseWriter, r *http.Request) {
 	util.OKMsg(w, "LDAP 认证成功", nil)
 }
 
+// reconcileLDAPStatus 以 LDAP 当前用户列表为准，双向校正本地 LDAP 账号的 status。
+//
+// 判定依据（用户的 go-ldap-admin/OpenLDAP 环境：禁用账号直接从目录删除，无标准停用属性）：
+//   - 本地 auth_type='ldap' 且用户名不在 LDAP 列表中 → LDAP 侧已删除/停用 → status=0
+//   - 用户名在 LDAP 列表但条目被标准属性标记停用 → status=0
+//   - 用户名在 LDAP 列表且未被停用 → status=1（LDAP 恢复启用时本地同步恢复）
+//
+// 安全保护：
+//   - LDAP 返回空列表时不做任何变更，避免连接/配置异常导致本地 LDAP 账号被全部误禁用；
+//   - 只处理 auth_type='ldap'，本地密码/TOTP/飞书等账号一律不动。
+func reconcileLDAPStatus(users []LdapUser) (disabled, enabled int, err error) {
+	if len(users) == 0 {
+		return 0, 0, fmt.Errorf("LDAP 未返回任何用户，跳过状态同步（防止误禁用）")
+	}
+	present := make(map[string]bool, len(users))
+	for _, u := range users {
+		if !u.Disabled {
+			// AD 用户名大小写不敏感，统一转小写比对，避免大小写差异误判为"已删号"。
+			present[strings.ToLower(u.Username)] = true
+		}
+	}
+	rows, err := db.DB.Query(`SELECT username, status FROM account WHERE auth_type='ldap'`)
+	if err != nil {
+		return 0, 0, err
+	}
+	type acc struct {
+		name   string
+		status int
+	}
+	var locals []acc
+	for rows.Next() {
+		var a acc
+		if rows.Scan(&a.name, &a.status) == nil {
+			locals = append(locals, a)
+		}
+	}
+	_ = rows.Close()
+	for _, a := range locals {
+		want := 0
+		if present[strings.ToLower(a.name)] {
+			want = 1
+		}
+		if a.status == want {
+			continue
+		}
+		if _, e := db.DB.Exec(`UPDATE account SET status=?, updated_at=datetime('now','localtime') WHERE username=? AND auth_type='ldap'`, want, a.name); e != nil {
+			continue
+		}
+		if want == 1 {
+			enabled++
+		} else {
+			disabled++
+		}
+	}
+	return disabled, enabled, nil
+}
+
 // LdapSync 从 LDAP 同步用户（本地建号，密码标记为 LDAP 认证）
 func LdapSync(w http.ResponseWriter, r *http.Request) {
 	c, err := ldapConnect()
@@ -698,7 +759,7 @@ func LdapSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.Close()
-	users, err := c.ListUsers()
+	users, err := c.ListUsersDetail()
 	if err != nil {
 		util.Fail(w, "同步失败: "+err.Error())
 		return
@@ -706,11 +767,11 @@ func LdapSync(w http.ResponseWriter, r *http.Request) {
 	added, skipped, quotaFull := 0, 0, 0
 	limit, used, _ := license.UserQuota()
 	for _, u := range users {
-		if !validName(u) {
+		if !validName(u.Username) {
 			continue
 		}
 		var exists int
-		_ = db.DB.QueryRow(`SELECT COUNT(*) FROM account WHERE username=?`, u).Scan(&exists)
+		_ = db.DB.QueryRow(`SELECT COUNT(*) FROM account WHERE username=?`, u.Username).Scan(&exists)
 		if exists > 0 {
 			skipped++
 			continue
@@ -719,17 +780,30 @@ func LdapSync(w http.ResponseWriter, r *http.Request) {
 			quotaFull++
 			continue
 		}
-		if _, err := db.DB.Exec(`INSERT INTO account(username,password,auth_type,status,created_at) VALUES(?,?,?,1,datetime('now','localtime'))`,
-			u, "-", "ldap"); err == nil {
+		status := 1
+		if u.Disabled {
+			status = 0 // LDAP 侧已标记停用的新账号直接建为禁用
+		}
+		if _, err := db.DB.Exec(`INSERT INTO account(username,password,auth_type,status,created_at) VALUES(?,?,?,?,datetime('now','localtime'))`,
+			u.Username, "-", "ldap", status); err == nil {
 			used++
-			_ = vpn.IssueUserCert(u)
+			_ = vpn.IssueUserCert(u.Username)
 			added++
 		}
+	}
+	// 以 LDAP 为准双向校正本地 LDAP 账号状态（LDAP 删号 → 本地禁用；LDAP 恢复 → 本地启用）
+	disabled, enabled, recErr := reconcileLDAPStatus(users)
+	if recErr != nil {
+		db.Syslog("admin", "LDAP 状态同步跳过", recErr.Error(), clientIP(r))
+	}
+	if disabled > 0 || enabled > 0 {
+		db.Syslog("admin", "LDAP 账号状态同步", fmt.Sprintf("自动禁用 %d，恢复启用 %d", disabled, enabled), clientIP(r))
 	}
 	syncAuthFiles()
 	license.Invalidate()
 	util.OK(w, map[string]int{"added": added, "skipped": skipped, "total": len(users),
-		"quota_full": quotaFull, "user_limit": limit, "user_used": used})
+		"quota_full": quotaFull, "user_limit": limit, "user_used": used,
+		"disabled": disabled, "enabled": enabled})
 }
 
 // LdapPing 测试连接：管理员绑定 + 统计匹配用户数（对齐原版"成功匹配 N 个用户"）
