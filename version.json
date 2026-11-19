@@ -1,8 +1,8 @@
 {
-  "version": "1.2.6",
-  "released_at": "2026-11-18",
-  "notes": "KSVPN v1.2.6：LDAP 账号停用自动禁用本地 VPN 账号（双向同步 + 认证实时拦截）。支持 go-ldap-admin 删号式、OpenLDAP 保留账号属性标记、Windows AD 域（UAC 禁用位/账号过期/锁定/msDS-UserAccountDisabled）三类目录；同步时 LDAP 停用→本地禁用、恢复→本地启用；大域分页（突破 AD 1000 条上限）与复合过滤器属性解析；新增可选「停用账号过滤器」兜底。其余能力同 v1.2.5（用户列表多选批量设置到期时间、ks-sslvpn-go 命名统一、在线升级与回滚等）。",
-  "package": "https://gitee.com/KingStrongerGee/ks-sslvpn-go/releases/download/v1.2.6/ks-sslvpn-go-v1.2.6.tar.gz",
-  "sha256": "eb11b361d2cd1bf74d42894cd4c0ec2afe18e3a4012b54a94b6f0412d0313f78",
+  "version": "1.2.7",
+  "released_at": "2026-11-19",
+  "notes": "KSVPN v1.2.7：在线会话强制踢下线——多选/全选、跨实例批量踢下线及行内踢下线；新增 OpenVPN management 通道（每实例 mgmt.sock unix），sslvpn init 幂等补齐存量实例配置；POST /log/kick 接口含实例名校验、去重、仅踢在线用户与审计日志。存量实例需重启一次生成 mgmt.sock（走在线升级重建容器时自动完成），未重启时接口明确报错提示。其余能力同 v1.2.6（LDAP 停用自动禁用、AD 域适配等）。",
+  "package": "https://gitee.com/KingStrongerGee/ks-sslvpn-go/releases/download/v1.2.7/ks-sslvpn-go-v1.2.7.tar.gz",
+  "sha256": "5e6a460d99abab11aa7b76ecf8828e181b4d50179f1ffcd4059ecc6ed518b0dd",
   "min_version": "1.2.0"
 }
