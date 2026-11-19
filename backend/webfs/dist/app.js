@@ -971,20 +971,64 @@ async function pageOnline(main) {
   main.innerHTML = `<div class="card">
     <div class="topbar"><h3 style="margin:0">📶 在线会话</h3>
       <div class="inline">
+        <span class="muted" id="onlineSelTip" style="margin-right:6px">未选择（勾选可多选，支持跨实例一起踢下线）</span>
+        <button class="ghost" onclick="onlineKickSelected()">⛔ 批量踢下线</button>
         <button class="primary" onclick="enter('online')">⟳ 获取最新数据</button>
       </div></div>
     <div id="onlineTable">${loading}</div></div>`;
   const d = await api("/log/status");
-  renderOnlineTable(document.getElementById("onlineTable"), d.data.list || []);
+  renderOnlineTable(document.getElementById("onlineTable"), d.data.list || [], true);
 }
-function renderOnlineTable(el, list) {
+// interactive=true 时显示复选框与"踢下线"操作列（仅在线会话页；首页概览只读）
+function renderOnlineTable(el, list, interactive) {
   el.innerHTML = list.length ? `<table>
-    <tr><th>用户名</th><th>真实 IP:端口</th><th>虚拟 IP</th><th>接收字节</th><th>发送字节</th><th>上线时间</th><th>在线时长</th></tr>
-    ${list.map(u => { const dur = u.connected_since ? Math.floor(Date.now() / 1000 - u.connected_since) : 0; return `<tr>
+    <tr>${interactive ? '<th><input type="checkbox" id="onSelAll" onchange="onlineToggleAll(this)" title="全选/取消"></th>' : ""}
+      <th>实例</th><th>用户名</th><th>真实 IP:端口</th><th>虚拟 IP</th><th>接收字节</th><th>发送字节</th><th>上线时间</th><th>在线时长</th>${interactive ? "<th>操作</th>" : ""}</tr>
+    ${list.map((u, i) => { const dur = u.connected_since ? Math.floor(Date.now() / 1000 - u.connected_since) : 0; return `<tr>
+      ${interactive ? `<td><input type="checkbox" class="onChk" data-i="${i}" onchange="onlineSelChanged()"></td>` : ""}
+      <td>${esc(u.service || "-")}</td>
       <td>${esc(u.username)}</td><td>${esc(u.real_ip)}</td><td><b style="color:var(--primary)">${esc(u.virtual_ip || "-")}</b></td>
       <td>${fmtBytes(u.bytes_recv)}</td><td>${fmtBytes(u.bytes_send)}</td>
-      <td>${u.connected_since ? fmtTime(u.connected_since) : "-"}</td><td>${u.connected_since && dur > 0 ? fmtOnline(dur) : "-"}</td></tr>`; }).join("")}</table>`
-    : `<p class="muted" style="text-align:center;padding:40px 0">暂无数据</p>`;
+      <td>${u.connected_since ? fmtTime(u.connected_since) : "-"}</td><td>${u.connected_since && dur > 0 ? fmtOnline(dur) : "-"}</td>
+      ${interactive ? `<td><a href="javascript:;" class="lk r" onclick="onlineKickOne(${i})">踢下线</a></td>` : ""}</tr>`; }).join("")}</table>`
+    : `<p class="muted" style="text-align:center;padding:40px 0">暂无在线用户</p>`;
+  if (interactive) { window._onlineUsers = list; onlineSelChanged(); }
+}
+function onlineToggleAll(box) {
+  document.querySelectorAll(".onChk").forEach(c => { c.checked = box.checked; });
+  onlineSelChanged();
+}
+function onlineSelChanged() {
+  const all = document.querySelectorAll(".onChk").length;
+  const sel = document.querySelectorAll(".onChk:checked").length;
+  const box = document.getElementById("onSelAll");
+  if (box) box.checked = all > 0 && sel === all;
+  const tip = document.getElementById("onlineSelTip");
+  if (tip) tip.textContent = sel > 0 ? `已选 ${sel} 人（可跨实例一起踢）` : "未选择（勾选可多选，支持跨实例一起踢下线）";
+}
+function onlineKickOne(i) {
+  const u = (window._onlineUsers || [])[i];
+  if (u) onlineKick([{ service: u.service, username: u.username }]);
+}
+function onlineKickSelected() {
+  const items = [...document.querySelectorAll(".onChk:checked")].map(x => {
+    const u = (window._onlineUsers || [])[Number(x.dataset.i)];
+    return u ? { service: u.service, username: u.username } : null;
+  }).filter(Boolean);
+  if (!items.length) { toast("请先勾选要踢下线的在线用户", false); return; }
+  onlineKick(items);
+}
+function onlineKick(items) {
+  const names = items.map(x => esc(x.username)).join("、");
+  confirmModal("强制下线", `将强制 <b>${names}</b> 共 ${items.length} 个在线连接断开，客户端会自动重新连接。确定继续？`, async () => {
+    const r = await api("/log/kick", { body: { items } });
+    const d = r.data || {};
+    let msg = r.msg || "操作完成";
+    if (d.not_online && d.not_online.length) msg += `；${d.not_online.length} 人已离线`;
+    if (d.failed && d.failed.length) msg += `；${d.failed.length} 人失败`;
+    toast(msg, r.code === 1);
+    enter("online");
+  });
 }
 
 /* ================= 分组管理 ================= */

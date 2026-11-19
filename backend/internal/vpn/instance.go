@@ -483,8 +483,9 @@ func RemoveCcd(svcName, username string) error {
 
 // OnlineUser 在线用户信息（来自 status.log）
 type OnlineUser struct {
-	Username   string `json:"username"`
-	RealIP     string `json:"real_ip"`
+	Username   string `json:"username"` // = Common Name（证书 CN）
+	Service    string `json:"service"`  // 所属实例名（批量踢人需按实例下发指令）
+	RealIP     string `json:"real_ip"`  // "IP:端口"，来自 status.log 的 Real Address
 	VirtualIP  string `json:"virtual_ip"`
 	ConnectedS int64  `json:"connected_since"`
 	RecvBytes  int64  `json:"bytes_recv"`
@@ -546,6 +547,7 @@ func ParseStatusLog(svcName string) []OnlineUser {
 	}
 	// 回填虚拟 IP；routing table 缺失时从 ipp.txt 补
 	for i := range users {
+		users[i].Service = svcName
 		if v, ok := vip[users[i].Username]; ok {
 			users[i].VirtualIP = v
 		}

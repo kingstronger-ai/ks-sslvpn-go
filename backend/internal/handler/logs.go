@@ -62,6 +62,44 @@ func LogStatus(w http.ResponseWriter, r *http.Request) {
 	util.OK(w, map[string]any{"list": users, "count": len(users), "time": db.Now()})
 }
 
+// LogKick 强制在线用户下线：按实例分组向 OpenVPN management 下发 kill 指令。
+// 前端可多选跨实例用户一次提交；后端逐项校验实例名合法性，防止路径穿越。
+func LogKick(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Items []vpn.KickTarget `json:"items"`
+	}
+	if err := util.ReadJSON(r, &req); err != nil || len(req.Items) == 0 {
+		util.Fail(w, "参数错误：请选择要下线的用户")
+		return
+	}
+	if len(req.Items) > 500 {
+		util.Fail(w, "单次最多强制下线 500 个用户")
+		return
+	}
+	clean := make([]vpn.KickTarget, 0, len(req.Items))
+	for _, it := range req.Items {
+		svc := strings.TrimSpace(it.Service)
+		cn := strings.TrimSpace(it.Username)
+		if svc == "" || cn == "" || !validName(svc) || !validName(cn) {
+			util.Fail(w, "存在非法的实例名或用户名")
+			return
+		}
+		clean = append(clean, vpn.KickTarget{Service: svc, Username: cn})
+	}
+	res := vpn.KickClients(clean)
+	detail := fmt.Sprintf("强制下线 %d 人", res.Kicked)
+	if len(res.Failed) > 0 {
+		detail += "；失败: " + strings.Join(res.Failed, ", ")
+	}
+	if len(res.NotOnline) > 0 {
+		detail += "；已离线: " + strings.Join(res.NotOnline, ", ")
+	}
+	db.Syslog("admin", "强制用户下线", detail, clientIP(r))
+	util.OKMsg(w, fmt.Sprintf("已强制下线 %d 人，客户端将自动重连", res.Kicked), map[string]any{
+		"kicked": res.Kicked, "failed": res.Failed, "not_online": res.NotOnline,
+	})
+}
+
 func LogAccess(w http.ResponseWriter, r *http.Request) {
 	day := r.URL.Query().Get("date")
 	keyword := r.URL.Query().Get("keyword")

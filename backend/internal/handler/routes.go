@@ -81,6 +81,7 @@ func init() {
 
 	// ---- 日志 ----
 	reg("GET", "/log/status", true, LogStatus)
+	reg("POST", "/log/kick", true, LogKick)
 	reg("GET", "/log/access", true, LogAccess)
 	reg("GET", "/log/clientip", true, LogClientIP)
 	reg("GET", "/log/vpnserverlog", true, LogVPNServer)

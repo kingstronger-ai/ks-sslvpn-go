@@ -46,6 +46,8 @@ topology subnet
 push "topology subnet"
 ifconfig-pool-persist {{.InstanceDir}}/ipp.txt
 status {{.InstanceDir}}/status.log 1
+# 管理接口（后台"在线会话 → 强制下线"用 unix socket 下发 kill 指令，仅容器内可见）
+management {{.InstanceDir}}/mgmt.sock unix
 log-append {{.InstanceDir}}/openvpn.log
 verb 3
 client-connect {{.HookDir}}/connect.sh

@@ -562,6 +562,14 @@ func runInit() error {
 	if err := writeHookScripts(); err != nil {
 		return err
 	}
+	// 存量实例配置迁移：为旧版 server.conf 补 management 行（幂等）。
+	// 必须在 entrypoint 拉起 openvpn 之前完成——此处正是 sslvpn init 阶段；
+	// 主程序启动时再次调用也不会重复追加。新实例由模板一次性写全。
+	if n, err := vpn.EnsureManagementConfs(); err != nil {
+		log.Printf("管理接口配置迁移失败: %v", err)
+	} else if n > 0 {
+		log.Printf("管理接口配置迁移：%d 个存量实例已补 management 指令（重启实例后生效）", n)
+	}
 	// 路由转发 + SNAT（容器重建后 iptables 规则会丢失，此处按实例网段重建）
 	_ = fw.EnableForward()
 	handler.SetupSNAT()
