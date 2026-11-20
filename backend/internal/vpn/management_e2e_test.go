@@ -12,7 +12,8 @@ import (
 	"time"
 )
 
-// 端到端：模拟 OpenVPN management unix socket，验证跨实例多选批量 kill 指令下发。
+// 端到端：模拟 OpenVPN management unix socket，验证跨实例多选批量下发 HALT 指令。
+// 服务端需先响应 `status 3`（返回 CLIENT_LIST 含 CID），再接收 client-kill 指令。
 // Windows 的 AF_UNIX 要求短绝对路径，故用盘符根下的短目录；Linux/macOS 用 t.TempDir。
 func TestKickClientsBatchOverManagementSocket(t *testing.T) {
 	oldBase := BaseDir
@@ -30,34 +31,35 @@ func TestKickClientsBatchOverManagementSocket(t *testing.T) {
 	BaseDir = dir
 	defer func() { BaseDir = oldBase }()
 
-	makeInstance := func(name string, clients string) net.Listener {
+	statusHead := "TITLE\tOpenVPN 2.6.12\n" +
+		"HEADER\tCLIENT_LIST\tCommon Name\tReal Address\tVirtual Address\tVirtual IPv6 Address\tBytes Received\tBytes Sent\tConnected Since\tConnected Since (time_t)\tUsername\tClient ID\tPeer ID\tData Channel Cipher\n"
+
+	type fakeServer struct {
+		ln   net.Listener
+		text string
+	}
+	makeInstance := func(name, status3 string) *fakeServer {
 		inst := filepath.Join(dir, "instance", name)
 		if err := os.MkdirAll(inst, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		status := "OpenVPN CLIENT LIST\nUpdated,Wed Nov 18 16:00:00 2026\n" +
-			"Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since\n" + clients +
-			"ROUTING TABLE\nVirtual Address,Common Name,Real Address,Last Ref\nGLOBAL STATS\nEND\n"
-		if err := os.WriteFile(filepath.Join(inst, "status.log"), []byte(status), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		// 伪装成"已启用管理接口"：socket 文件存在即可被 KickClients 探测到
+		// 伪装成"已启用管理接口"：socket 文件存在即可被探测到
 		ln, err := net.Listen("unix", managementSocket(name))
 		if err != nil {
 			t.Fatal(err)
 		}
-		return ln
+		return &fakeServer{ln: ln, text: status3}
 	}
 
-	ln1 := makeInstance("office", "alice,1.1.1.1:4000,1,2,Wed Nov 18 15:00:00 2026\n")
-	ln2 := makeInstance("branch", "bob,2.2.2.2:4000,1,2,Wed Nov 18 15:00:00 2026\n")
-	defer ln1.Close()
-	defer ln2.Close()
+	s1 := makeInstance("office", statusHead+"CLIENT_LIST\talice\t1.1.1.1:4000\t10.8.0.2\t\t1\t2\tWed Nov 18 15:00:00 2026\t1\talice\t11\t1\tAES-256-GCM\nEND\n")
+	s2 := makeInstance("branch", statusHead+"CLIENT_LIST\tbob\t2.2.2.2:4000\t10.8.0.3\t\t1\t2\tWed Nov 18 15:00:00 2026\t1\tbob\t22\t1\tAES-256-GCM\nEND\n")
+	defer s1.ln.Close()
+	defer s2.ln.Close()
 
 	got := make(chan string, 16)
-	serve := func(ln net.Listener) {
+	serve := func(s *fakeServer) {
 		for {
-			c, err := ln.Accept()
+			c, err := s.ln.Accept()
 			if err != nil {
 				return
 			}
@@ -73,14 +75,18 @@ func TestKickClientsBatchOverManagementSocket(t *testing.T) {
 					if line == "quit" {
 						return
 					}
+					if line == "status 3" {
+						_, _ = c.Write([]byte(">INFO:OpenVPN Management Interface Version 3\n" + s.text))
+						continue
+					}
 					got <- line
-					_, _ = c.Write([]byte("SUCCESS: kill command succeeded\n"))
+					_, _ = c.Write([]byte("SUCCESS: client-kill command succeeded\n"))
 				}
 			}(c)
 		}
 	}
-	go serve(ln1)
-	go serve(ln2)
+	go serve(s1)
+	go serve(s2)
 
 	res := KickClients([]KickTarget{
 		{Service: "office", Username: "alice"},
@@ -90,7 +96,7 @@ func TestKickClientsBatchOverManagementSocket(t *testing.T) {
 	})
 
 	if res.Kicked != 2 {
-		t.Errorf("应成功下发 2 条, got %d (%+v)", res.Kicked, res)
+		t.Errorf("应成功下发 2 人, got %d (%+v)", res.Kicked, res)
 	}
 	if len(res.NotOnline) != 1 || !strings.Contains(res.NotOnline[0], "ghost") {
 		t.Errorf("不在线目标识别错误: %v", res.NotOnline)
@@ -105,7 +111,7 @@ func TestKickClientsBatchOverManagementSocket(t *testing.T) {
 		cmds = append(cmds, <-got)
 	}
 	sort.Strings(cmds)
-	if len(cmds) != 2 || cmds[0] != "kill alice" || cmds[1] != "kill bob" {
-		t.Errorf("下发的指令错误: %v", cmds)
+	if len(cmds) != 2 || cmds[0] != "client-kill 11 HALT" || cmds[1] != "client-kill 22 HALT" {
+		t.Errorf("下发的 HALT 指令错误: %v", cmds)
 	}
 }

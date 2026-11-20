@@ -1,8 +1,8 @@
 {
-  "version": "1.2.7",
-  "released_at": "2026-11-19",
-  "notes": "KSVPN v1.2.7：在线会话强制踢下线——多选/全选、跨实例批量踢下线及行内踢下线；新增 OpenVPN management 通道（每实例 mgmt.sock unix），sslvpn init 幂等补齐存量实例配置；POST /log/kick 接口含实例名校验、去重、仅踢在线用户与审计日志。存量实例需重启一次生成 mgmt.sock（走在线升级重建容器时自动完成），未重启时接口明确报错提示。其余能力同 v1.2.6（LDAP 停用自动禁用、AD 域适配等）。",
-  "package": "https://gitee.com/KingStrongerGee/ks-sslvpn-go/releases/download/v1.2.7/ks-sslvpn-go-v1.2.7.tar.gz",
-  "sha256": "5e6a460d99abab11aa7b76ecf8828e181b4d50179f1ffcd4059ecc6ed518b0dd",
+  "version": "1.2.8",
+  "released_at": "2026-11-20",
+  "notes": "KSVPN v1.2.8：修复账号密码登录用户被强制下线后凭静态密码自动重连的问题。强制下线指令由 kill <CN>（RESTART，客户端软重启自动重连）改为 client-kill <CID> HALT，客户端收到 HALT 注册 SIGTERM 退出进程、不再自动重连；CID 经 management status 3 实时解析 CN→CID 并做数字校验防注入，同一账号多设备连接一并踢掉。管理员踢下线=进程退出需手动重连，网络中断=进程存活可自动重连，两者可靠区分，断开感知从近 2 分钟缩短到秒级。沿用 v1.2.7 已生成的 mgmt.sock，两端客户端无需改动。其余能力同 v1.2.7。",
+  "package": "https://gitee.com/KingStrongerGee/ks-sslvpn-go/releases/download/v1.2.8/ks-sslvpn-go-v1.2.8.tar.gz",
+  "sha256": "f47631f1051ed264567e2f340056f5290c12062ecad99f8c5e657a5dbb7cda22",
   "min_version": "1.2.0"
 }

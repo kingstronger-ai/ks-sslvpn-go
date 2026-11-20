@@ -1020,7 +1020,7 @@ function onlineKickSelected() {
 }
 function onlineKick(items) {
   const names = items.map(x => esc(x.username)).join("、");
-  confirmModal("强制下线", `将强制 <b>${names}</b> 共 ${items.length} 个在线连接断开，客户端会自动重新连接。确定继续？`, async () => {
+  confirmModal("强制下线", `将强制 <b>${names}</b> 共 ${items.length} 个在线连接断开，客户端将退出且不会自动重连，需手动重新连接。确定继续？`, async () => {
     const r = await api("/log/kick", { body: { items } });
     const d = r.data || {};
     let msg = r.msg || "操作完成";

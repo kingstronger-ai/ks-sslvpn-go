@@ -95,7 +95,7 @@ func LogKick(w http.ResponseWriter, r *http.Request) {
 		detail += "；已离线: " + strings.Join(res.NotOnline, ", ")
 	}
 	db.Syslog("admin", "强制用户下线", detail, clientIP(r))
-	util.OKMsg(w, fmt.Sprintf("已强制下线 %d 人，客户端将自动重连", res.Kicked), map[string]any{
+	util.OKMsg(w, fmt.Sprintf("已强制下线 %d 人，客户端将退出且不会自动重连", res.Kicked), map[string]any{
 		"kicked": res.Kicked, "failed": res.Failed, "not_online": res.NotOnline,
 	})
 }
