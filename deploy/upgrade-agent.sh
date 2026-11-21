@@ -9,6 +9,9 @@
 #       -> docker compose up -d --build -> 健康检查 -> 失败自动回滚。
 # 任何情况下都不执行 docker compose down -v / docker volume rm。
 set -u
+# 备份包内含 CA 私钥、VPN 明文口令与初始管理员口令，工作目录按密钥级资产处理：
+# 全局 umask 077 保证新建的备份包/状态/日志文件均为 0600、目录为 0700。
+umask 077
 
 APP_DIR="${APP_DIR:-/opt/ks-sslvpn-go}"
 CONTAINER="${CONTAINER:-ks-sslvpn-go}"
@@ -20,6 +23,11 @@ CUR_ID=""
 CUR_BID=""
 
 mkdir -p "$WORK/backups" "$WORK/packages"
+# 修正旧部署遗留的宽松权限（umask 只影响新建文件，旧产物需显式收紧）
+chmod 700 "$WORK" "$WORK/backups" "$WORK/packages" 2>/dev/null || true
+for _f in status.ini backups.txt upgrade.log log.txt; do
+  [ -e "$WORK/$_f" ] && chmod 600 "$WORK/$_f" 2>/dev/null || true
+done
 [ -f "$WORK/status.ini" ] || cat > "$WORK/status.ini" <<EOF
 phase=idle
 progress=0
@@ -132,6 +140,9 @@ do_backup() {
     echo "$img" > "$bk/image.txt"
   fi
 
+  # 备份含 CA 私钥/明文口令，收紧权限；数据卷快照由容器内进程创建，不继承宿主机 umask，需显式覆盖
+  chmod 700 "$bk" 2>/dev/null || true
+  chmod -R go-rwx "$bk" 2>/dev/null || true
   printf '%s|%s|%s|%s|%s\n' "$bid" "$(date '+%F %T')" "$ver" \
       "$(du -sh "$bk" 2>/dev/null | cut -f1)" "$bk" >> "$WORK/backups.txt"
   put "$WORK/backups.txt" backups.txt
@@ -290,11 +301,19 @@ do_upgrade() {
     set_status "failed" 40 "升级包含越界成员 $bad_member（应全部位于 $top/），已中止"
     return 1
   fi
+  # 符号链接/硬链接成员检查（CWE-59）：恶意包可先放一个指向 /etc/cron.d 的符号链接，
+  # 再放一个经该链接路径的普通文件，tar 顺序解压时会写穿到 APP_DIR 之外并以 root 落盘。
+  # 正版发布包全部是普通文件/目录，不含任何链接成员，直接拒绝即可。
+  if tar -tvzf "$localpkg" 2>/dev/null | awk '{p=substr($1,1,1); if (p=="l" || index($0,"link to")>0) {print; exit}}' | grep -q .; then
+    link_member="$(tar -tvzf "$localpkg" 2>/dev/null | awk '{p=substr($1,1,1); if (p=="l" || index($0,"link to")>0) {print; exit}}')"
+    set_status "failed" 40 "升级包含符号链接/硬链接成员 $link_member，已中止（源码未改动）"
+    return 1
+  fi
   tar -xzOf "$localpkg" "$top/docker-compose.yml" > "$WORK/backups/$bid/compose.new.yml" 2>/dev/null || true
 
   # ④ 原地覆盖解压（tar 只覆盖不删除，保留现网 compose 的端口/环境自定义）
   set_status "extracting" 55 "正在原地覆盖源码"
-  if ! tar -xzf "$localpkg" -C "$(dirname "$APP_DIR")"; then
+  if ! tar -xzf --no-same-owner --no-same-permissions "$localpkg" -C "$(dirname "$APP_DIR")"; then
     rollback_and_fail "解压失败"
     return 1
   fi

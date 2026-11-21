@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -96,6 +97,23 @@ type updateManifest struct {
 	MinVersion      string `json:"min_version"`
 }
 
+// updateRedirectPolicy 返回更新源的重定向策略：禁止 https→http 降级、禁止跨主机跳转、
+// 限制重定向次数。防止 manifest 本体经 302 被引导到明文或其它主机（CWE-601/319）。
+func updateRedirectPolicy(origin *url.URL) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if req.URL.Scheme != "https" {
+			return errors.New("更新源重定向禁止降级到非 https")
+		}
+		if origin != nil && !strings.EqualFold(req.URL.Host, origin.Host) {
+			return errors.New("更新源重定向禁止跳转到其它主机")
+		}
+		if len(via) >= 3 {
+			return errors.New("更新源重定向次数过多")
+		}
+		return nil
+	}
+}
+
 // fetchManifest 由服务端自行读取更新源；apply 时绝不采信前端传来的下载地址，
 // 避免管理端被注入任意 URL 后让宿主机代理下载执行。
 func fetchManifest() (*updateManifest, error) {
@@ -112,7 +130,13 @@ func fetchManifest() (*updateManifest, error) {
 	case strings.HasPrefix(u, "file://"):
 		data, err = os.ReadFile(strings.TrimPrefix(u, "file://"))
 	case strings.HasPrefix(strings.ToLower(u), "https://"):
-		client := &http.Client{Timeout: 12 * time.Second}
+		// 禁止重定向降级：默认 client.Get 会跟随 302 从 https 跳到 http，
+		// 使 manifest 本体以明文传输，破坏"强制 HTTPS"信任假设（CWE-601/CWE-319）。
+		originHost, _ := url.Parse(u)
+		client := &http.Client{
+			Timeout:       12 * time.Second,
+			CheckRedirect: updateRedirectPolicy(originHost),
+		}
 		resp, e := client.Get(u)
 		if e != nil {
 			return nil, fmt.Errorf("获取更新源失败：%v", e)

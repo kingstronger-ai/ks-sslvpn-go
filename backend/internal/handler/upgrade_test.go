@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -224,5 +225,31 @@ func TestUpgradePackageFallback(t *testing.T) {
 		if _, err := fetchManifest(); err == nil {
 			t.Errorf("非法备用源应被拒绝: %s", bad)
 		}
+	}
+}
+
+// P2-01 回归：更新源重定向不得降级到 http、不得跨主机。
+func TestUpdateRedirectPolicy(t *testing.T) {
+	origin, _ := url.Parse("https://gitee.com/KingStrongerGee/ks-sslvpn-go/raw/main/version.json")
+	policy := updateRedirectPolicy(origin)
+	mk := func(scheme, host string) *http.Request {
+		r := httptest.NewRequest("GET", scheme+"://"+host+"/version.json", nil)
+		return r
+	}
+	via := []*http.Request{{}}
+
+	if err := policy(mk("http", "gitee.com"), via); err == nil {
+		t.Error("https→http 降级应被拒绝")
+	}
+	if err := policy(mk("https", "evil.example"), via); err == nil {
+		t.Error("跨主机跳转应被拒绝")
+	}
+	if err := policy(mk("https", "gitee.com"), via); err != nil {
+		t.Errorf("同主机 https 跳转应放行: %v", err)
+	}
+	// 重定向次数过多
+	longVia := make([]*http.Request, 3)
+	if err := policy(mk("https", "gitee.com"), longVia); err == nil {
+		t.Error("重定向次数过多应被拒绝")
 	}
 }

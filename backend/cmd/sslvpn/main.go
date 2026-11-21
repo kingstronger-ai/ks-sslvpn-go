@@ -280,7 +280,7 @@ func main() {
 		if err := runInit(); err != nil {
 			log.Fatal("init: ", err)
 		}
-		fmt.Println("初始化完成：默认管理员 admin / ChangeMe（请立即修改密码）")
+		fmt.Println("初始化完成：初始管理员口令为随机强口令，见数据卷 initial_admin_password.txt（权限 0600），请登录后立即修改")
 		return
 	}
 
@@ -338,7 +338,7 @@ func main() {
 			// 未指定用户名：优先超级管理员，避免重置到普通运维账号
 			if err := db.DB.QueryRow(`SELECT username FROM admin WHERE super=1 ORDER BY id LIMIT 1`).Scan(&name); err != nil {
 				if err := db.DB.QueryRow(`SELECT username FROM admin ORDER BY id LIMIT 1`).Scan(&name); err != nil {
-					fmt.Println("错误：库中没有管理员账号，请执行 `sslvpn init` 重建默认管理员（admin / ChangeMe）")
+					fmt.Println("错误：库中没有管理员账号，请执行 `sslvpn init` 重建管理员（初始随机口令见数据卷 initial_admin_password.txt）")
 					os.Exit(1)
 				}
 			}

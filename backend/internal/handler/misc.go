@@ -173,12 +173,23 @@ func SysUpdateEmail(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "参数错误")
 		return
 	}
+	// 口令留空表示「保持不变」：读接口不再回传明文，前端只提交新口令。
+	// 留空时用库中现有口令回填，避免误清空导致邮件功能失效。
+	if strings.TrimSpace(c.Pass) == "" {
+		c.Pass = loadSMTP().Pass
+	}
 	saveSMTP(&c)
 	util.OKMsg(w, "SMTP 配置已保存", nil)
 }
 
 func SysGetSMTP(w http.ResponseWriter, r *http.Request) {
-	util.OK(w, loadSMTP())
+	// 不再回传明文口令，只回是否已设置（与 SSO 渠道密钥打码策略一致）。
+	c := loadSMTP()
+	util.OK(w, map[string]any{
+		"host": c.Host, "port": c.Port, "user": c.User,
+		"title": c.Title, "sender": c.Sender, "ssl": c.SSL, "test_mail": c.TestMail,
+		"pass_set": strings.TrimSpace(c.Pass) != "",
+	})
 }
 
 func SysSendTestMail(w http.ResponseWriter, r *http.Request) {
@@ -611,16 +622,18 @@ func LdapGet(w http.ResponseWriter, r *http.Request) {
 			&row.TLSMode, &row.CACert, &row.TLSServerName)
 	if err == sql.ErrNoRows {
 		util.OK(w, map[string]any{"enabled": 0, "filter": "(uid=%s)", "port": 389, "disabled_filter": "",
-			"tls_mode": "", "ca_cert": "", "tls_server_name": ""})
+			"tls_mode": "", "ca_cert": "", "tls_server_name": "", "bind_pass_set": false})
 		return
 	}
 	if err != nil {
 		util.Fail(w, "查询失败")
 		return
 	}
+	// 不再回传 bind_dn 对应的 bind_pass 明文，只回是否已设置（与 SSO 密钥打码策略一致）。
 	util.OK(w, map[string]any{
-		"server": row.Server, "port": row.Port, "bind_dn": row.BindDN, "bind_pass": row.BindPass,
-		"base_dn": row.BaseDN, "ou": row.OU, "filter": row.Filter, "enabled": row.Enabled,
+		"server": row.Server, "port": row.Port, "bind_dn": row.BindDN,
+		"bind_pass_set": strings.TrimSpace(row.BindPass) != "",
+		"base_dn":       row.BaseDN, "ou": row.OU, "filter": row.Filter, "enabled": row.Enabled,
 		"disabled_filter": disabledFilter, "tls_mode": row.TLSMode, "ca_cert": row.CACert,
 		"tls_server_name": row.TLSServerName,
 	})
@@ -652,6 +665,14 @@ func LdapUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Port == 0 {
 		req.Port = 389
+	}
+	// bind_pass 留空表示「保持不变」：读接口不再回传明文，前端只提交新口令。
+	// 留空时用库中现有口令回填，避免误清空导致 LDAP 认证失效。
+	if strings.TrimSpace(req.BindPass) == "" {
+		var oldPass string
+		if e := db.DB.QueryRow(`SELECT bind_pass FROM ldap_conf WHERE id=1`).Scan(&oldPass); e == nil {
+			req.BindPass = oldPass
+		}
 	}
 	// TLS 模式白名单：拒绝未知值，避免拼写错误导致证书校验被静默降级。
 	switch strings.ToLower(strings.TrimSpace(req.TLSMode)) {

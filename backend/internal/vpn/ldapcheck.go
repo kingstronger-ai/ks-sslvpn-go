@@ -73,34 +73,49 @@ func LDAPBindCheck(username, password string) bool {
 	// 用户名转义，防止 )(&| 等字符篡改过滤器、绕过停用判定。
 	f := strings.ReplaceAll(filter, "%s", goldap.EscapeFilter(username))
 	attrs := append([]string{"dn"}, ldaputil.DisabledAttrs...)
+	// 取全部命中（sizeLimit=0），而非只取首条：目录中同名多条时，停用记录可能排在后面。
+	// 与 handler 侧 BindCheck 保持一致：任一命中被标记停用即拒绝。
 	req := goldap.NewSearchRequest(searchBase, goldap.ScopeWholeSubtree, goldap.NeverDerefAliases,
-		1, 10, false, f, attrs, nil)
+		0, 10, false, f, attrs, nil)
 	res, err := conn.Search(req)
 	if err != nil || len(res.Entries) == 0 {
 		if res, err = conn.Search(goldap.NewSearchRequest(baseDN, goldap.ScopeWholeSubtree,
-			goldap.NeverDerefAliases, 1, 10, false, f, attrs, nil)); err != nil || len(res.Entries) == 0 {
+			goldap.NeverDerefAliases, 0, 10, false, f, attrs, nil)); err != nil || len(res.Entries) == 0 {
 			return false // 删除型停用：LDAP 里已无此账号，搜不到 DN 直接拒绝
 		}
 	}
-	entry := res.Entries[0]
-	// 保留账号型停用：账号仍在目录里但被标记停用，bind 前主动拦截
-	// （AD 的 UAC 禁用位/账号过期/锁定、ppolicy 锁定等，统一判定）。
-	if ldaputil.EntryDisabled(entry) {
-		return false
+	// 保留账号型停用：任一命中被标记停用（AD UAC 禁用位/账号过期/锁定、ppolicy 等）即拒绝。
+	for _, e := range res.Entries {
+		if ldaputil.EntryDisabled(e) {
+			return false
+		}
 	}
+	// 自定义停用过滤器：命中 DN 集合与任一候选 DN 相等即拒绝（拒绝优先）。
+	// 失败时放行，避免因过滤器语法问题误拒所有 LDAP 登录，由同步侧继续维护状态。
+	disabledDNs := map[string]bool{}
 	if strings.TrimSpace(disabledFilter) != "" {
-		// 自定义停用过滤器：用该过滤器查命中 DN 集合，命中当前用户 DN 即拒绝。
-		// 失败时放行（避免因过滤器语法问题误拒所有 LDAP 登录），由同步侧继续维护状态。
 		if dre, derr := conn.Search(goldap.NewSearchRequest(searchBase, goldap.ScopeWholeSubtree,
 			goldap.NeverDerefAliases, 0, 10, false, disabledFilter, []string{"dn"}, nil)); derr == nil {
 			for _, de := range dre.Entries {
-				if strings.EqualFold(de.DN, entry.DN) {
-					return false
-				}
+				disabledDNs[strings.ToLower(de.DN)] = true
 			}
 		}
 	}
-	return conn.Bind(entry.DN, password) == nil
+	// 选定用于 bind 的 DN：必须唯一且未被停用过滤器命中；多条同名且状态冲突按拒绝优先。
+	bindDNEntry := ""
+	for _, e := range res.Entries {
+		if disabledDNs[strings.ToLower(e.DN)] {
+			return false
+		}
+		if bindDNEntry != "" && !strings.EqualFold(bindDNEntry, e.DN) {
+			return false // 多个不同 DN 命中同一用户名，无法唯一确定身份，拒绝
+		}
+		bindDNEntry = e.DN
+	}
+	if bindDNEntry == "" {
+		return false
+	}
+	return conn.Bind(bindDNEntry, password) == nil
 }
 
 // normalizeLDAPAddr 规范化 LDAP 地址：去掉 scheme / 尾部斜杠 / 内嵌端口，返回纯主机名。

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,10 +33,37 @@ type loginReq struct {
 	CodeID   string `json:"code_id"`
 }
 
+// 登录失败锁定采用双维度：真实 IP 与用户名。
+// 仅按 IP 锁定时，攻击者可用伪造代理头或轮换出口 IP 绕过；加上 username 维度后，
+// 即使 IP 不断变化，针对同一个账号（如 admin）的爆破仍会在阈值处被锁定。
+// 带到期时间，避免失败计数只增不减导致合法用户被永久锁死（DoS）。
+const (
+	loginMaxFails     = 10
+	loginLockDuration = 10 * time.Minute
+)
+
+type loginFailState struct {
+	fails       int
+	lockedUntil time.Time
+}
+
 var loginAttempts = struct {
 	sync.Mutex
-	m map[string]int
-}{m: map[string]int{}}
+	m map[string]*loginFailState
+}{m: map[string]*loginFailState{}}
+
+// loginLocked 检查某键是否处于锁定期；过期条目在此惰性清理。
+func loginLocked(key string) bool {
+	st := loginAttempts.m[key]
+	if st == nil {
+		return false
+	}
+	if !st.lockedUntil.IsZero() && time.Now().After(st.lockedUntil) {
+		delete(loginAttempts.m, key)
+		return false
+	}
+	return st.fails >= loginMaxFails
+}
 
 func LoginCheck(w http.ResponseWriter, r *http.Request) {
 	var req loginReq
@@ -44,15 +72,18 @@ func LoginCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip := clientIP(r)
+	user := strings.ToLower(strings.TrimSpace(req.Username))
+	ipKey := "ip:" + ip
+	userKey := "u:" + user
 
-	// 登录失败次数限制（防爆破）
+	// 登录失败次数限制（真实 IP + 用户名双维度，任一锁定即拒绝）
 	loginAttempts.Lock()
-	if loginAttempts.m[ip] >= 10 {
-		loginAttempts.Unlock()
+	ipLocked, userLocked := loginLocked(ipKey), loginLocked(userKey)
+	loginAttempts.Unlock()
+	if ipLocked || userLocked {
 		util.Fail(w, "失败次数过多，请 10 分钟后再试")
 		return
 	}
-	loginAttempts.Unlock()
 
 	// 图形验证码
 	if !checkCaptcha(req.CodeID, req.Captcha) {
@@ -66,7 +97,17 @@ func LoginCheck(w http.ResponseWriter, r *http.Request) {
 		Scan(&hash, &status)
 	if err != nil || status != 1 || bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) != nil {
 		loginAttempts.Lock()
-		loginAttempts.m[ip]++
+		for _, k := range []string{ipKey, userKey} {
+			st := loginAttempts.m[k]
+			if st == nil {
+				st = &loginFailState{}
+				loginAttempts.m[k] = st
+			}
+			st.fails++
+			if st.fails >= loginMaxFails && st.lockedUntil.IsZero() {
+				st.lockedUntil = time.Now().Add(loginLockDuration)
+			}
+		}
 		loginAttempts.Unlock()
 		db.Syslog(req.Username, "登录失败", "用户名或密码错误", ip)
 		util.Fail(w, "用户名或密码错误")
@@ -74,7 +115,8 @@ func LoginCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	loginAttempts.Lock()
-	delete(loginAttempts.m, ip)
+	delete(loginAttempts.m, ipKey)
+	delete(loginAttempts.m, userKey)
 	loginAttempts.Unlock()
 
 	token := middleware.MakeSession()
@@ -96,14 +138,27 @@ func Logout(w http.ResponseWriter, r *http.Request) {
 	util.OKMsg(w, "已退出", nil)
 }
 
+// trustProxyHeaders 仅在显式开启 SSLVPN_TRUST_PROXY=1 时才采信 X-Real-IP / X-Forwarded-For。
+// 默认关闭：服务由 ListenAndServeTLS 直接对外，没有可信反代强制覆写这些头，
+// 任意客户端都能伪造它们来绕过按 IP 的登录/限流锁定（CWE-290）。
+func trustProxyHeaders() bool {
+	return os.Getenv("SSLVPN_TRUST_PROXY") == "1"
+}
+
 func clientIP(r *http.Request) string {
-	if v := r.Header.Get("X-Real-IP"); v != "" {
-		return v
-	}
-	if v := r.Header.Get("X-Forwarded-For"); v != "" {
-		return strings.TrimSpace(strings.Split(v, ",")[0])
+	if trustProxyHeaders() {
+		if v := r.Header.Get("X-Real-IP"); v != "" {
+			return strings.TrimSpace(v)
+		}
+		if v := r.Header.Get("X-Forwarded-For"); v != "" {
+			return strings.TrimSpace(strings.Split(v, ",")[0])
+		}
 	}
 	host := r.RemoteAddr
+	// 优先用标准库解析，兼容 IPv6（如 "[::1]:58443"）；失败再退回按最后一个冒号切分
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
 	if i := strings.LastIndex(host, ":"); i > 0 {
 		host = host[:i]
 	}

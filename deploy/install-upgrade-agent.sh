@@ -35,6 +35,9 @@ Environment=WORK=$DEST
 ExecStart=/bin/bash $DEST/upgrade-agent.sh
 Restart=always
 RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

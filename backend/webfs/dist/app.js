@@ -134,6 +134,10 @@ function toast(msg, ok = true) {
   clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 2800);
 }
 function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+// JS 字符串字面量上下文转义：用于 onclick="fn('${jsq(x)}')"。
+// 把会闭合 HTML 属性或 JS 字符串、以及会被 HTML 实体二次解码的字符，统一编码成 \xNN。
+// 浏览器解析 HTML 时 \xNN 是普通字符不会被还原，交给 JS 引擎后才解码为原始字符，杜绝引号逃逸。
+function jsq(s) { return String(s ?? "").replace(/[\\'"<>&\x00-\x1f\x7f]/g, c => "\\x" + c.charCodeAt(0).toString(16).padStart(2, "0")); }
 function badge(st, okText = "启用", offText = "禁用") { return st ? `<span class="badge ok">${okText}</span>` : `<span class="badge off">${offText}</span>`; }
 function fmtTime(ts) { return ts ? new Date(ts * 1000).toLocaleString("zh-CN", { hour12: false }) : "-"; }
 function fmtBytes(n) {
@@ -440,9 +444,9 @@ async function pageUsers(main) {
     <td class="inline" style="flex-wrap:nowrap">
       <a href="javascript:;" class="lk" onclick="userEditModal(${a.id})">编辑</a>
       <a href="javascript:;" class="lk g" onclick="userDetail(${a.id})">详情</a>
-      <a href="javascript:;" class="lk g" onclick="userDownload(${a.id},'${esc(a.username)}')">下载配置</a>
+      <a href="javascript:;" class="lk g" onclick="userDownload(${a.id},'${jsq(a.username)}')">下载配置</a>
       <a href="javascript:;" class="lk o" onclick="userMail(${a.id})">邮件</a>
-      <a href="javascript:;" class="lk r" onclick="userDel(${a.id},'${esc(a.username)}')">删除</a>
+      <a href="javascript:;" class="lk r" onclick="userDel(${a.id},'${jsq(a.username)}')">删除</a>
     </td></tr>`).join("");
   document.getElementById("userTable").innerHTML = list.length ? `<table>
     <tr><th><input type="checkbox" id="uSelAll" onchange="userToggleAll(this)" title="全选/取消"></th><th>VPN用户名</th><th>密码</th><th>联系邮箱<br><span class="muted" style="font-weight:normal">仅发邮件用</span></th><th>在线状态</th><th>客户端IP</th><th>用户状态</th><th>认证类型</th><th>所属分组</th><th>过期时间</th><th>创建时间</th><th>功能操作</th></tr>${rows}</table>`
@@ -684,7 +688,7 @@ function acRender() {
   const list = AC_SRC.filter(u => !kw || u.toLowerCase().includes(kw)).slice(0, 60);
   if (!list.length) { drop.style.display = "none"; return; }
   drop.innerHTML = list.map(u =>
-    `<div class="ac-item" onmousedown="acPick('${esc(u)}')">${esc(u)}</div>`).join("");
+    `<div class="ac-item" onmousedown="acPick('${jsq(u)}')">${esc(u)}</div>`).join("");
   drop.style.display = "block";
 }
 function acPick(u) {
@@ -809,7 +813,7 @@ async function pageLdap(main) {
     <div class="form-row"><label>服务器地址</label><input id="ldServer" value="${esc(c.server || "")}" placeholder="ldap://10.5.0.27 或 IP"></div>
     <div class="form-row"><label>基础 DN</label><input id="ldBase" value="${esc(c.base_dn || "")}" placeholder="dc=example,dc=com"></div>
     <div class="form-row"><label>绑定 DN</label><input id="ldBind" value="${esc(c.bind_dn || "")}" placeholder="cn=admin,dc=xxx,dc=xxx"></div>
-    <div class="form-row"><label>密码</label><input id="ldPass" type="password" value="${esc(c.bind_pass || "")}"></div>
+    <div class="form-row"><label>密码</label><input id="ldPass" type="password" value="" placeholder="${c.bind_pass_set ? "已保存，留空表示不修改" : "未设置，请输入绑定密码"}"></div>
     <div class="form-row"><label>组织单元 OU</label><input id="ldOU" value="${esc(c.ou || "")}" placeholder="people（可空）"></div>
     <div class="form-row"><label>搜索过滤器</label><div>
       <input id="ldFilter" value="${esc(c.filter || "(uid=%s)")}" placeholder="%s 为用户名占位">
@@ -1065,7 +1069,7 @@ async function pageGroups(main) {
     <td>${g.id}</td><td><b>${esc(g.name)}</b></td><td>${esc(g.note || "-")}</td><td>${g.users}</td><td>${g.services}</td>
     <td class="inline" style="flex-wrap:nowrap">
       <a href="javascript:;" class="lk" onclick="groupEditModal(${g.id})">编辑</a>
-      <a href="javascript:;" class="lk g" onclick="groupAttachModal(${g.id},'${esc(g.name)}')">关联服务</a>
+      <a href="javascript:;" class="lk g" onclick="groupAttachModal(${g.id},'${jsq(g.name)}')">关联服务</a>
       <a href="javascript:;" class="lk r" onclick="groupDel(${g.id})">删除</a></td></tr>`).join("");
   document.getElementById("grpTable").innerHTML = (d.data.list || []).length ? `<table>
     <tr><th>分组编号</th><th>分组名称</th><th>分组描述</th><th>用户数</th><th>关联服务</th><th>操作</th></tr>${rows}</table>`
@@ -1125,12 +1129,12 @@ async function pageServices(main) {
       <td>${s.max_clients}</td><td>${s.online} 人</td>
       <td>${badge(s.status, "运行中", "已停止")}</td>
       <td class="inline" style="flex-wrap:nowrap">
-        ${s.status ? `<a href="javascript:;" class="lk o" onclick="svcStop('${esc(s.name)}')">停止</a>`
-                   : `<a href="javascript:;" class="lk g" onclick="svcStart('${esc(s.name)}')">启动</a>`}
-        <a href="javascript:;" class="lk" onclick="svcEditModal('${esc(s.name)}')">编辑</a>
-        <a href="javascript:;" class="lk g" onclick="svcConf('${esc(s.name)}')">配置</a>
-        <a href="javascript:;" class="lk g" onclick="svcLog('${esc(s.name)}')">日志</a>
-        <a href="javascript:;" class="lk r" onclick="svcDel(${s.id},'${esc(s.name)}')">删除</a></td></tr>`).join("")}</table>`
+        ${s.status ? `<a href="javascript:;" class="lk o" onclick="svcStop('${jsq(s.name)}')">停止</a>`
+                   : `<a href="javascript:;" class="lk g" onclick="svcStart('${jsq(s.name)}')">启动</a>`}
+        <a href="javascript:;" class="lk" onclick="svcEditModal('${jsq(s.name)}')">编辑</a>
+        <a href="javascript:;" class="lk g" onclick="svcConf('${jsq(s.name)}')">配置</a>
+        <a href="javascript:;" class="lk g" onclick="svcLog('${jsq(s.name)}')">日志</a>
+        <a href="javascript:;" class="lk r" onclick="svcDel(${s.id},'${jsq(s.name)}')">删除</a></td></tr>`).join("")}</table>`
     : `<div class="tip-banner">ⓘ 提示：还没有服务，点击上面"添加服务"按钮创建一个服务吧!</div>`;
 }
 function svcAddModal() {
@@ -1402,7 +1406,7 @@ async function pageSmtp(main) {
     <h3>✉ 邮件服务</h3>
     <div class="form-row"><label>SMTP服务器</label><input id="smHost" value="${esc(s.host || "")}" placeholder="smtp.example.com"></div>
     <div class="form-row"><label>SMTP用户</label><input id="smUser" value="${esc(s.user || "")}"></div>
-    <div class="form-row"><label>SMTP用户秘钥</label><input id="smPass" type="password" value="${esc(s.pass || "")}"></div>
+    <div class="form-row"><label>SMTP用户秘钥</label><input id="smPass" type="password" value="" placeholder="${s.pass_set ? "已保存，留空表示不修改" : "未设置，请输入授权码"}"></div>
     <div class="form-row"><label>SMTP服务端口</label><input id="smPort" type="number" value="${s.port || 465}" style="max-width:120px"></div>
     <div class="form-row"><label>发送者标题</label><input id="smTitle" value="${esc(s.title || "")}" placeholder="如：KSVPN（收件人看到的发件人名称）"></div>
     <div class="form-row"><label>发件人地址</label><input id="smSender" value="${esc(s.sender || "")}" placeholder="必须是邮箱，如 421381118@qq.com"></div>
@@ -2032,8 +2036,8 @@ async function renderAdminTable() {
     <td>${a.super ? '<span class="badge blue">超级管理员</span>' : '<span class="badge gray">普通管理员</span>'}</td>
     <td class="muted">${esc(a.created_at || "-")}</td>
     <td class="inline" style="flex-wrap:nowrap">
-      <a href="javascript:;" class="lk" onclick="adminEditModal(${a.id},'${esc(a.username)}','${esc(a.email || "")}',${a.status})">编辑</a>
-      <a href="javascript:;" class="lk r" onclick="adminDel(${a.id},'${esc(a.username)}')">删除</a></td></tr>`).join("");
+      <a href="javascript:;" class="lk" onclick="adminEditModal(${a.id},'${jsq(a.username)}','${jsq(a.email || "")}',${a.status})">编辑</a>
+      <a href="javascript:;" class="lk r" onclick="adminDel(${a.id},'${jsq(a.username)}')">删除</a></td></tr>`).join("");
   document.getElementById("admTable").innerHTML = list.length ? `<table>
     <tr><th>ID</th><th>用户名</th><th>邮箱</th><th>状态</th><th>角色</th><th>创建时间</th><th>操作</th></tr>${rows}</table>`
     : `<p class="muted" style="text-align:center;padding:30px 0">暂无管理员</p>`;

@@ -18,6 +18,8 @@ import (
 // secret；同时 local/totp 分支必须查库里的真实密码（ssoAccountByUsername 不查密码列）。
 // 本用例锁住：两代字段名、TOTP 逗号格式、错误密码必须 401。
 func TestLDAPProfileAccountLogin(t *testing.T) {
+	// 本用例用 X-Real-IP 让每个请求落独立限流桶；默认客户端头不被信任，这里显式开启。
+	t.Setenv("SSLVPN_TRUST_PROXY", "1")
 	clean := func() {
 		_, _ = db.DB.Exec(`DELETE FROM account WHERE username IN ('localtest1','totptest1')`)
 	}

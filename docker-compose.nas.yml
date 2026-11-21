@@ -4,7 +4,7 @@
 #   1) 建目录：/vol1/1000/docker/sslvpn（飞牛），把本文件复制进去并改名 docker-compose.yml
 #      源码也放同目录（若用“本机构建”方式），或改用下面的 image: 方式加载离线镜像
 #   2) 飞牛：Docker → Compose → 新增项目 → 选该目录 → 创建项目后立即启动
-#   3) 访问 https://<NAS地址>:8443 ，默认 admin / ChangeMe（首次登录请立刻改）
+#   3) 访问 https://<NAS地址>:8443 ，初始管理员口令见数据卷 initial_admin_password.txt（随机强口令，权限 0600，首次登录请立刻改）
 #
 # 两种取镜像的方式，二选一：
 #   A. 本机构建（需源码 + 能拉 golang:1.22-alpine / debian:12-slim）：保留 build: .

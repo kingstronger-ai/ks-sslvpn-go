@@ -179,12 +179,8 @@ func ssoRateAllow(bucket string, r *http.Request, max int, window time.Duration)
 }
 
 func ssoClientIP(r *http.Request) string {
-	if v := r.Header.Get("X-Real-IP"); v != "" {
-		return strings.TrimSpace(v)
-	}
-	if v := r.Header.Get("X-Forwarded-For"); v != "" {
-		return strings.TrimSpace(strings.Split(v, ",")[0])
-	}
+	// 与 clientIP 一致：默认忽略客户端可控代理头，仅 SSLVPN_TRUST_PROXY=1 时才采信，
+	// 否则 SSO 各接口的 IP 限流桶可被伪造头绕过。
 	return clientIP(r)
 }
 

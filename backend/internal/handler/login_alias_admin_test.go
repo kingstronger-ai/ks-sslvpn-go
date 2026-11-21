@@ -33,6 +33,8 @@ func TestNormalizeLoginAliases(t *testing.T) {
 // 且另一个账号共用同一联系邮箱。默认只短账号；开启 UPN/DN 后别名可用，
 // 只开邮箱时因歧义必须拒绝。配置下发链路（LDAPProfile）与 auth-verify 共用解析函数。
 func TestLDAPProfileAliasLogin(t *testing.T) {
+	// 本用例用 X-Real-IP 让每个请求落独立限流桶；默认客户端头不被信任，这里显式开启。
+	t.Setenv("SSLVPN_TRUST_PROXY", "1")
 	clean := func() {
 		_, _ = db.DB.Exec(`DELETE FROM account WHERE username IN ('zhangsan','aliaspeer')`)
 		_, _ = db.DB.Exec(`DELETE FROM settings WHERE k IN (?,?)`, vpn.SetAliasMail, vpn.SetAliasUPN)
