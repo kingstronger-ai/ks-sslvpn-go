@@ -1,9 +1,9 @@
 {
-  "version": "1.3.0",
+  "version": "1.3.1",
   "released_at": "2026-11-21",
-  "notes": "KSVPN v1.3.0 LDAP/AD 安全加固与升级双源：LDAP 支持 TLS 证书校验与 StartTLS（insecure/system/custom/starttls）、修复停用账号判定与批量误禁用熔断、导入按停用状态设 status；在线升级新增 package_fallback 备用源、主源失败自动切换（主 Gitee 备 GitHub）；扫码 mock 须显式开启 SSLVPN_ALLOW_SSO_MOCK=1，生产默认关闭。存量库 tls_mode 默认 insecure（兼容旧自签），建议在 LDAP 配置页改为 system/custom；升级代理脚本已更新为主备双源，请确认宿主机 deploy/upgrade-agent.sh 为最新版。",
-  "package": "https://gitee.com/KingStrongerGee/ks-sslvpn-go/releases/download/v1.3.0/ks-sslvpn-go-v1.3.0.tar.gz",
-  "package_fallback": "https://github.com/kingstronger-ai/ks-sslvpn-go/releases/download/v1.3.0/ks-sslvpn-go-v1.3.0.tar.gz",
-  "sha256": "528b95c2d565d491215b17e2a48bb4e058662364468cbca2829d9a0651af3469",
+  "notes": "KSVPN v1.3.1 安全全面排查加固：修复管理员登录防爆破绕过（来源 IP 默认不可伪造、失败锁定新增账号维度且到期释放）；LDAP 认证遍历全部同名命中，防止停用账号被放行；SMTP/LDAP 口令不再明文回显（留空提交保持不变）；升级包拒绝符号链接成员、更新源禁止重定向降级、备份目录 0700/文件 0600；修复前端内联事件存储型 XSS，清理默认口令过时文案。由独立安全工程师全面排查（STRIDE/OWASP/CWE）后加固，无 P0 阻断项。注意：宿主机升级代理 deploy/upgrade-agent.sh 与 install-upgrade-agent.sh 已更新（备份权限加固），请手动替换一次宿主机脚本后重启代理服务；reneg-sec 密钥轮换、容器降权等兼容性项列入后续版本。",
+  "package": "https://gitee.com/KingStrongerGee/ks-sslvpn-go/releases/download/v1.3.1/ks-sslvpn-go-v1.3.1.tar.gz",
+  "package_fallback": "https://github.com/kingstronger-ai/ks-sslvpn-go/releases/download/v1.3.1/ks-sslvpn-go-v1.3.1.tar.gz",
+  "sha256": "eefc61c9dc044291888f2bde8d121c9fc543c90c75a92973afc18308d2a9ffc7",
   "min_version": "1.2.0"
 }
