@@ -3,6 +3,7 @@
   "released_at": "2026-11-21",
   "notes": "KSVPN v1.2.9 安全加固版：修复安全码接口爆破与在线升级 RCE 攻击链（升级链路强制 HTTPS 且包 sha256 强制校验、拒绝管理端注入任意下载地址）；默认管理员口令随机化；API 接口名称统一校验防路径穿越；API 默认只绑本地；修复存储型 XSS。存量用户请主动修改 admin 默认口令 ChangeMe，并按新版安装文档人工更新宿主机 deploy/upgrade-agent.sh（本次取消升级代理自更新）。Mac 客户端同步 v0.5.3。其余能力同 v1.2.8。",
   "package": "https://gitee.com/KingStrongerGee/ks-sslvpn-go/releases/download/v1.2.9/ks-sslvpn-go-v1.2.9.tar.gz",
+  "package_fallback": "https://github.com/kingstronger-ai/ks-sslvpn-go/releases/download/v1.2.9/ks-sslvpn-go-v1.2.9.tar.gz",
   "sha256": "6e270bd91ab0660e31ec482e959103dbf5f30bb8c2da963ca50405b0fad05d6a",
   "min_version": "1.2.0"
 }
