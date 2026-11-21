@@ -38,8 +38,53 @@ func upgradeDir() string {
 	return defaultUpgradeDir
 }
 
-// updateSource version.json 地址：http(s):// 或容器内 file:// 路径
+// updateSource version.json 地址：https:// 或容器内 file:// 路径
 func updateSource() string { return strings.TrimSpace(os.Getenv("SSLVPN_UPDATE_URL")) }
+
+// isAbsPath 跨平台判断绝对路径：Linux 容器为 / 开头，测试环境可能为 Windows 盘符。
+func isAbsPath(p string) bool {
+	if strings.HasPrefix(p, "/") {
+		return true
+	}
+	if len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/') {
+		return true // C:\ 或 C:/
+	}
+	return false
+}
+
+// safeUpdateRef 校验更新源/升级包引用，拒绝明文 http://。
+// 信任锚：仅允许 HTTPS（传输层认证 + 完整性）或容器内/宿主机本地文件引用。
+// 明文 http 可被 DNS 劫持/中间人替换为恶意包，进而借升级代理获得宿主机 root，故一律拒绝。
+func safeUpdateRef(ref string) error {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return errors.New("引用为空")
+	}
+	low := strings.ToLower(ref)
+	if strings.HasPrefix(low, "http://") {
+		return errors.New("出于安全考虑已拒绝明文 http 更新源，请使用 https:// 或本地文件")
+	}
+	if strings.HasPrefix(low, "https://") {
+		// 必须有主机名，防止 https:///path 这类畸形 URL
+		host := strings.TrimPrefix(ref, ref[:8]) // 去 "https://"
+		if host == "" || strings.HasPrefix(host, "/") {
+			return errors.New("https 更新源地址不合法")
+		}
+		return nil
+	}
+	if strings.HasPrefix(low, "file://") {
+		p := strings.TrimPrefix(ref, "file://")
+		if !isAbsPath(p) {
+			return errors.New("file:// 更新源必须是绝对路径")
+		}
+		return nil
+	}
+	// 宿主机本地绝对路径（仅 package 允许；更新源在 fetchManifest 另行约束）
+	if isAbsPath(ref) {
+		return nil
+	}
+	return errors.New("更新源仅支持 https:// 或本地绝对路径")
+}
 
 type updateManifest struct {
 	Version    string `json:"version"`
@@ -57,12 +102,15 @@ func fetchManifest() (*updateManifest, error) {
 	if u == "" {
 		return nil, errors.New("未配置更新源：请在 docker-compose.yml 的 environment 加 SSLVPN_UPDATE_URL（指向 version.json）")
 	}
+	if err := safeUpdateRef(u); err != nil {
+		return nil, err
+	}
 	var data []byte
 	var err error
 	switch {
 	case strings.HasPrefix(u, "file://"):
 		data, err = os.ReadFile(strings.TrimPrefix(u, "file://"))
-	case strings.HasPrefix(u, "http://"), strings.HasPrefix(u, "https://"):
+	case strings.HasPrefix(strings.ToLower(u), "https://"):
 		client := &http.Client{Timeout: 12 * time.Second}
 		resp, e := client.Get(u)
 		if e != nil {
@@ -91,6 +139,12 @@ func fetchManifest() (*updateManifest, error) {
 	m.Sha256 = strings.ToLower(strings.TrimSpace(m.Sha256))
 	m.MinVersion = strings.TrimSpace(m.MinVersion)
 	m.Notes = strings.TrimSpace(m.Notes)
+	// 升级包引用同样禁止明文 http（即使 manifest 来自可信 https 源也不放行）
+	if m.Package != "" {
+		if err := safeUpdateRef(m.Package); err != nil {
+			return nil, fmt.Errorf("升级包地址不安全：%w", err)
+		}
+	}
 	return &m, nil
 }
 
@@ -209,16 +263,16 @@ func UpgradeCheck(w http.ResponseWriter, r *http.Request) {
 	newer := version.IsNewer(m.Version, version.Version)
 	compatible := m.MinVersion == "" || version.Compare(version.Version, m.MinVersion) >= 0
 	util.OK(w, map[string]any{
-		"current":     version.Version,
-		"latest":      m.Version,
-		"has_update":  newer,
-		"released_at": m.ReleasedAt,
-		"notes":       m.Notes,
-		"package":     m.Package,
-		"sha256":      m.Sha256,
-		"min_version": m.MinVersion,
-		"compatible":  compatible,
-		"ready":       newer && compatible && m.Package != "" && validSHA256(m.Sha256) && agentOnline(),
+		"current":      version.Version,
+		"latest":       m.Version,
+		"has_update":   newer,
+		"released_at":  m.ReleasedAt,
+		"notes":        m.Notes,
+		"package":      m.Package,
+		"sha256":       m.Sha256,
+		"min_version":  m.MinVersion,
+		"compatible":   compatible,
+		"ready":        newer && compatible && m.Package != "" && validSHA256(m.Sha256) && agentOnline(),
 		"agent_online": agentOnline(),
 	})
 }

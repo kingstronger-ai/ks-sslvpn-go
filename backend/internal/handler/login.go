@@ -157,6 +157,127 @@ func checkCaptcha(id, input string) bool {
 	return ans == strings.TrimSpace(input)
 }
 
+// ---------- 安全码：HMAC 入库 + 失败锁定 + 单码 ----------
+
+const (
+	secureCodeLen    = 8
+	codeMaxFails     = 5
+	codeLockDuration = 10 * time.Minute
+	codeSendInterval = 60 * time.Second
+)
+
+type codeFailState struct {
+	fails    int
+	until    time.Time // 锁定到期时间；零值表示未锁定
+	lastSent time.Time // 上次发码时间（key 前缀 send:）
+}
+
+// codeAttempts 失败计数/锁定状态：进程内维护。
+// key 形如 "ip:<ip>"、"t:<target>"、"send:<target>"，三个维度互不冲突。
+var codeAttempts = struct {
+	sync.Mutex
+	m map[string]*codeFailState
+}{m: map[string]*codeFailState{}}
+
+func secureCodeKey() string {
+	if k := db.GetSetting("session_secret"); k != "" {
+		return k
+	}
+	return "ks-sslvpn-secure-code" // 兜底：正常启动 runInit 已生成 session_secret
+}
+
+// codeLocked 任一维度处于锁定期即返回 true。
+func codeLocked(keys ...string) bool {
+	now := time.Now()
+	codeAttempts.Lock()
+	defer codeAttempts.Unlock()
+	for _, k := range keys {
+		if st := codeAttempts.m[k]; st != nil && st.until.After(now) {
+			return true
+		}
+	}
+	return false
+}
+
+func codeFail(keys ...string) {
+	codeAttempts.Lock()
+	defer codeAttempts.Unlock()
+	for _, k := range keys {
+		st := codeAttempts.m[k]
+		if st == nil {
+			st = &codeFailState{}
+			codeAttempts.m[k] = st
+		}
+		st.fails++
+		if st.fails >= codeMaxFails {
+			st.until = time.Now().Add(codeLockDuration)
+			st.fails = 0
+		}
+	}
+}
+
+func codeClear(keys ...string) {
+	codeAttempts.Lock()
+	defer codeAttempts.Unlock()
+	for _, k := range keys {
+		delete(codeAttempts.m, k)
+	}
+}
+
+// canSendCode 同一 target 冷却期内不允许重复发码（防邮件轰炸 / 撞库探测）。
+func canSendCode(target string) bool {
+	key := "send:" + target
+	codeAttempts.Lock()
+	defer codeAttempts.Unlock()
+	st := codeAttempts.m[key]
+	if st != nil && time.Since(st.lastSent) < codeSendInterval {
+		return false
+	}
+	if st == nil {
+		st = &codeFailState{}
+		codeAttempts.m[key] = st
+	}
+	st.lastSent = time.Now()
+	return true
+}
+
+// issueSecureCode 发码：单 target 仅保留一张未消费码，库中只存 HMAC 摘要。
+func issueSecureCode(target, email, subject, what string) (string, error) {
+	code := util.RandomAlnumCode(secureCodeLen)
+	_, _ = db.DB.Exec(`DELETE FROM secure_code WHERE target=?`, target) // 新码作废旧码
+	digest := util.HMACSHA256Hex(secureCodeKey(), code)
+	_, _ = db.DB.Exec(`INSERT INTO secure_code(target,code,expire_at) VALUES(?,?,?)`,
+		target, digest, time.Now().Add(10*time.Minute).Format("2006-01-02 15:04:05"))
+	if err := mail.Send(loadSMTP(), email, subject,
+		"<p>您的"+what+"是：<b>"+code+"</b>，10 分钟内有效。如非本人操作请忽略。</p>"); err != nil {
+		return "", err
+	}
+	return code, nil
+}
+
+// verifySecureCode 校验并消费安全码，成功返回该码 id；keys 为失败计数维度。
+func verifySecureCode(target, code string, keys ...string) (int64, bool) {
+	if strings.TrimSpace(code) == "" || codeLocked(keys...) {
+		return 0, false
+	}
+	digest := util.HMACSHA256Hex(secureCodeKey(), code)
+	var id int64
+	err := db.DB.QueryRow(`SELECT id FROM secure_code WHERE target=? AND code=? AND expire_at>datetime('now','localtime')`,
+		target, digest).Scan(&id)
+	if err != nil {
+		codeFail(keys...)
+		return 0, false
+	}
+	codeClear(keys...)
+	_, _ = db.DB.Exec(`DELETE FROM secure_code WHERE id=?`, id)
+	return id, true
+}
+
+// codeDims 返回某次校验的 IP + target 两个失败计数维度。
+func codeDims(r *http.Request, target string) []string {
+	return []string{"ip:" + clientIP(r), "t:" + target}
+}
+
 // ---------- VPN 用户自助注册 / 找回 ----------
 
 func smtpCfg() *mail.Config { return loadSMTP() }
@@ -187,12 +308,11 @@ func GetSafeCode(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "邮箱未绑定任何管理员")
 		return
 	}
-	code := util.RandomCode(6)
-	_, _ = db.DB.Exec(`INSERT INTO secure_code(target,code,expire_at) VALUES(?,?,?)`,
-		req.Email, code, time.Now().Add(10*time.Minute).Format("2006-01-02 15:04:05"))
-	c := loadSMTP()
-	if err := mail.Send(c, req.Email, "SSLVPN 管理密码找回",
-		"<p>您的安全验证码是：<b>"+code+"</b>，10 分钟内有效。</p>"); err != nil {
+	if !canSendCode(req.Email) {
+		util.Fail(w, "发送过于频繁，请 60 秒后再试")
+		return
+	}
+	if _, err := issueSecureCode(req.Email, req.Email, "SSLVPN 管理密码找回", "安全验证码"); err != nil {
 		util.Fail(w, "邮件发送失败: "+err.Error())
 		return
 	}
@@ -209,11 +329,8 @@ func CheckCode(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "参数错误")
 		return
 	}
-	var id int64
-	err := db.DB.QueryRow(`SELECT id FROM secure_code WHERE target=? AND code=? AND expire_at>datetime('now','localtime')`,
-		req.Email, req.Code).Scan(&id)
-	if err != nil {
-		util.Fail(w, "安全码无效或已过期")
+	if _, ok := verifySecureCode(req.Email, req.Code, codeDims(r, req.Email)...); !ok {
+		util.Fail(w, "安全码无效或已过期；连续错误将被临时锁定")
 		return
 	}
 	if len(req.Pass) < 8 {
@@ -225,7 +342,6 @@ func CheckCode(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "重置失败")
 		return
 	}
-	_, _ = db.DB.Exec(`DELETE FROM secure_code WHERE id=?`, id)
 	util.OKMsg(w, "密码已重置，请使用新密码登录", nil)
 }
 
@@ -243,11 +359,11 @@ func GetCodeByVpnUser(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "用户不存在或未绑定邮箱")
 		return
 	}
-	code := util.RandomCode(6)
-	_, _ = db.DB.Exec(`INSERT INTO secure_code(target,code,expire_at) VALUES(?,?,?)`,
-		req.Username, code, time.Now().Add(10*time.Minute).Format("2006-01-02 15:04:05"))
-	if err := mail.Send(loadSMTP(), email, "VPN 密码找回",
-		"<p>您的安全验证码是：<b>"+code+"</b>，10 分钟内有效。</p>"); err != nil {
+	if !canSendCode(req.Username) {
+		util.Fail(w, "发送过于频繁，请 60 秒后再试")
+		return
+	}
+	if _, err := issueSecureCode(req.Username, email, "VPN 密码找回", "安全验证码"); err != nil {
 		util.Fail(w, "邮件发送失败: "+err.Error())
 		return
 	}
@@ -264,11 +380,8 @@ func FindVpnUserPasswd(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "参数错误")
 		return
 	}
-	var id int64
-	err := db.DB.QueryRow(`SELECT id FROM secure_code WHERE target=? AND code=? AND expire_at>datetime('now','localtime')`,
-		req.Username, req.Code).Scan(&id)
-	if err != nil {
-		util.Fail(w, "安全码无效或已过期")
+	if _, ok := verifySecureCode(req.Username, req.Code, codeDims(r, req.Username)...); !ok {
+		util.Fail(w, "安全码无效或已过期；连续错误将被临时锁定")
 		return
 	}
 	if len(req.Pass) < 6 {
@@ -280,7 +393,6 @@ func FindVpnUserPasswd(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "重置失败")
 		return
 	}
-	_, _ = db.DB.Exec(`DELETE FROM secure_code WHERE id=?`, id)
 	syncAuthFiles()
 	util.OKMsg(w, "VPN 密码已重置", nil)
 }
@@ -297,11 +409,11 @@ func GetRegisterVpnUserCode(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "系统未开放 VPN 用户自助注册")
 		return
 	}
-	code := util.RandomCode(6)
-	_, _ = db.DB.Exec(`INSERT INTO secure_code(target,code,expire_at) VALUES(?,?,?)`,
-		req.Email, code, time.Now().Add(10*time.Minute).Format("2006-01-02 15:04:05"))
-	if err := mail.Send(loadSMTP(), req.Email, "VPN 注册验证码",
-		"<p>您的注册验证码是：<b>"+code+"</b>，10 分钟内有效。</p>"); err != nil {
+	if !canSendCode(req.Email) {
+		util.Fail(w, "发送过于频繁，请 60 秒后再试")
+		return
+	}
+	if _, err := issueSecureCode(req.Email, req.Email, "VPN 注册验证码", "注册验证码"); err != nil {
 		util.Fail(w, "邮件发送失败: "+err.Error())
 		return
 	}
@@ -323,10 +435,8 @@ func RegisterVpnUser(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "系统未开放注册")
 		return
 	}
-	var id int64
-	if err := db.DB.QueryRow(`SELECT id FROM secure_code WHERE target=? AND code=? AND expire_at>datetime('now','localtime')`,
-		req.Email, req.Code).Scan(&id); err != nil {
-		util.Fail(w, "验证码无效或已过期")
+	if _, ok := verifySecureCode(req.Email, req.Code, codeDims(r, req.Email)...); !ok {
+		util.Fail(w, "验证码无效或已过期；连续错误将被临时锁定")
 		return
 	}
 	if !validName(req.Username) || len(req.Password) < 6 {
@@ -350,7 +460,6 @@ func RegisterVpnUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	license.Invalidate()
-	_, _ = db.DB.Exec(`DELETE FROM secure_code WHERE id=?`, id)
 	if err := vpn.IssueUserCert(req.Username); err != nil {
 		util.OKMsg(w, "注册成功（证书签发失败，请联系管理员重建配置）", nil)
 		return
@@ -379,10 +488,8 @@ func RegisterAdmin(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "系统未开放管理员注册")
 		return
 	}
-	var id int64
-	if err := db.DB.QueryRow(`SELECT id FROM secure_code WHERE target=? AND code=? AND expire_at>datetime('now','localtime')`,
-		req.Email, req.Code).Scan(&id); err != nil {
-		util.Fail(w, "验证码无效或已过期")
+	if _, ok := verifySecureCode(req.Email, req.Code, codeDims(r, req.Email)...); !ok {
+		util.Fail(w, "验证码无效或已过期；连续错误将被临时锁定")
 		return
 	}
 	hash, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
@@ -391,7 +498,6 @@ func RegisterAdmin(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "注册失败（用户名可能已存在）")
 		return
 	}
-	_, _ = db.DB.Exec(`DELETE FROM secure_code WHERE id=?`, id)
 	util.OKMsg(w, "管理员注册成功", nil)
 }
 

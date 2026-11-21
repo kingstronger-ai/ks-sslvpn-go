@@ -40,5 +40,5 @@ else
     echo "    !! 未找到 /usr/sbin/openvpn，跳过实例启动"
 fi
 
-echo ">>> 启动完成，Web 管理界面: https://0.0.0.0:${SSLVPN_WEB_PORT:-8443} (admin / ChangeMe)"
+echo ">>> 启动完成，Web 管理界面: https://0.0.0.0:${SSLVPN_WEB_PORT:-8443}（首次部署的初始口令见数据卷 initial_admin_password.txt，请登录后立即修改）"
 exec sslvpn

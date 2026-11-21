@@ -211,9 +211,16 @@ do_upgrade() {
     return 1
   fi
 
-  # ② 取包：http(s) 下载；否则视为宿主机绝对路径
+  # ② 取包：仅 https 下载（明文 http 可被中间人替换为恶意包 -> 宿主机 root），
+  #    否则视为宿主机本地绝对路径。rid 由容器以 UnixNano 生成，此处再白名单校验防路径注入。
   set_status "downloading" 25 "正在获取升级包"
-  if [[ "$pkg" == http* ]]; then
+  case "$rid" in
+    ''|*[!0-9]*) set_status "failed" 25 "升级请求 ID 不合法，已中止"; return 1 ;;
+  esac
+  if [[ "$pkg" == http://* ]]; then
+    set_status "failed" 25 "已拒绝明文 http 升级包（不安全），请使用 https://"
+    return 1
+  elif [[ "$pkg" == https://* ]]; then
     localpkg="$WORK/packages/$rid.tar.gz"
     if ! curl -fL --retry 2 -o "$localpkg" "$pkg"; then
       set_status "failed" 25 "下载升级包失败，已中止（源码未改动）"
@@ -221,6 +228,14 @@ do_upgrade() {
     fi
   else
     localpkg="$pkg"
+    # 本地路径必须是绝对路径，且不得含 .. 分段
+    case "$localpkg" in
+      /*) ;;
+      *) set_status "failed" 25 "升级包路径必须是绝对路径，已中止"; return 1 ;;
+    esac
+    case "/$localpkg/" in
+      *"/../"*) set_status "failed" 25 "升级包路径含 .. 已中止"; return 1 ;;
+    esac
     if [ ! -f "$localpkg" ]; then
       set_status "failed" 25 "找不到升级包 $localpkg，已中止（源码未改动）"
       return 1
@@ -240,6 +255,19 @@ do_upgrade() {
   top="$(tar -tzf "$localpkg" | head -1 | cut -d/ -f1)"
   if [ "$top" != "$(basename "$APP_DIR")" ]; then
     set_status "failed" 40 "升级包顶层目录为 $top，应为 $(basename "$APP_DIR")，已中止"
+    return 1
+  fi
+  # 成员路径穿越检查：禁止绝对路径 / .. 分段 / 顶层目录不一致的成员。
+  # 恶意包可借 ../ 写出 APP_DIR 之外（如 systemd unit、cron、agent 自身）获取 root。
+  if ! tar -tzf "$localpkg" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+    :
+  else
+    set_status "failed" 40 "升级包含非法路径成员（绝对路径或 ..），已中止（源码未改动）"
+    return 1
+  fi
+  bad_member="$(tar -tzf "$localpkg" | awk -F/ -v t="$top" '$1 != t {print; exit}')"
+  if [ -n "$bad_member" ]; then
+    set_status "failed" 40 "升级包含越界成员 $bad_member（应全部位于 $top/），已中止"
     return 1
   fi
   tar -xzOf "$localpkg" "$top/docker-compose.yml" > "$WORK/backups/$bid/compose.new.yml" 2>/dev/null || true
@@ -270,22 +298,11 @@ do_upgrade() {
 
   newver="$(tr -d '\r\n' < "$APP_DIR/backend/internal/version/VERSION" 2>/dev/null || echo "$ver")"
 
-  # ⑦ 代理自更新：新版包若带新的 upgrade-agent.sh，替换自身副本并重启服务加载
-  #    （systemd 单元跑的是 $WORK/upgrade-agent.sh，不随应用升级自动更新；mv 原子替换，
-  #     正在运行的旧进程不受影响，重启由 systemd 拉起新脚本）
+  # ⑦ 安全：不再从升级包内替换/重启升级代理自身。
+  #    以 root 运行的守护进程若可被一次普通升级替换，等于把宿主机 root 交给了更新源。
+  #    升级代理脚本变更改为随安装文档人工部署，不经应用升级包自动生效。
   if [ -f "$APP_DIR/deploy/upgrade-agent.sh" ] && ! cmp -s "$APP_DIR/deploy/upgrade-agent.sh" "$WORK/upgrade-agent.sh"; then
-    if cp -a "$APP_DIR/deploy/upgrade-agent.sh" "$WORK/upgrade-agent.sh.new" \
-       && mv -f "$WORK/upgrade-agent.sh.new" "$WORK/upgrade-agent.sh"; then
-      chmod +x "$WORK/upgrade-agent.sh"
-      logline "升级代理脚本已自更新，即将重启代理加载新逻辑"
-      set_status "done" 100 "升级完成，当前版本 $newver；升级前备份 $bid 可随时回滚；升级代理已自更新" "$newver"
-      logline "升级完成：$newver（备份 $bid）"
-      if [ -f /etc/systemd/system/sslvpn-upgrade-agent.service ]; then
-        systemctl restart sslvpn-upgrade-agent 2>/dev/null || true
-      fi
-      return 0
-    fi
-    logline "升级代理自更新失败，继续使用旧代理（不影响本次升级结果）"
+    logline "提示：升级包内 upgrade-agent.sh 与运行版本不同；出于安全不再自动替换代理，请按新版本安装文档人工更新 $WORK/upgrade-agent.sh"
   fi
 
   set_status "done" 100 "升级完成，当前版本 $newver；升级前备份 $bid 可随时回滚" "$newver"

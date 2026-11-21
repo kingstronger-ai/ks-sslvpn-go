@@ -337,6 +337,9 @@ func InitPKI() error {
 
 // IssueUserCert 为用户签发客户端证书
 func IssueUserCert(username string) error {
+	if !SafeConfigName(username) {
+		return fmt.Errorf("非法的用户名：%q", username)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	return easyrsa("build-client-full", username, "nopass")
@@ -344,6 +347,9 @@ func IssueUserCert(username string) error {
 
 // RevokeUserCert 吊销用户证书
 func RevokeUserCert(username string) error {
+	if !SafeConfigName(username) {
+		return fmt.Errorf("非法的用户名：%q", username)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if _, err := os.Stat(filepath.Join(PKIDir, "issued", username+".crt")); err != nil {
@@ -465,8 +471,69 @@ func appendExtraRoutes(body string, extra []string) string {
 	return out.String()
 }
 
+// SafeConfigName 校验将拼进文件系统路径/命令行/easy-rsa 的名称片段。
+// 纵深防御：即使上层 handler 漏检，vpn 层也拒绝路径穿越、绝对路径与
+// 以 '-' 开头（可能被当作 easy-rsa / 命令选项）的名称。
+// 允许字符集与 handler.validName 一致：字母数字 _ . - @，长度 1..64。
+func SafeConfigName(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	if name[0] == '-' { // 防止被 easy-rsa / exec 当作选项
+		return false
+	}
+	if name != filepath.Base(name) || name == "." || name == ".." {
+		return false // 路径穿越 / 非单一路径段
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return false
+	}
+	for _, c := range name {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == '-' || c == '@') {
+			return false
+		}
+	}
+	return true
+}
+
+// ccdSafeRaw 过滤 CCD Raw 中的危险指令。CCD 文件由 root 的 openvpn 进程读取，
+// script-security 2 下若写入 up/plugin/client-connect 等指令可在用户连接时以 root 执行任意命令。
+// 仅放行数据类指令：ifconfig-push / iroute / push / push-reset / push-remove / route / comment。
+func ccdSafeRaw(raw string) string {
+	var out []string
+	for _, line := range strings.Split(raw, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			out = append(out, line) // 保留注释与空行
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		cmd := strings.ToLower(fields[0])
+		switch cmd {
+		case "ifconfig-push", "iroute", "push", "push-reset", "push-remove", "route":
+			out = append(out, line)
+		default:
+			// 危险指令（script-security/up/plugin/client-connect/tls-verify/...
+			// 以及任何未知指令）一律丢弃，避免配置注入演变为 root RCE。
+			continue
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
 // WriteCcd 渲染用户 CCD 文件到指定实例
 func WriteCcd(svcName string, c *Ccd) error {
+	if !SafeConfigName(c.Username) {
+		return fmt.Errorf("非法的 CCD 用户名：%q", c.Username)
+	}
+	if c.Raw != "" {
+		c = &Ccd{ // 不修改调用方对象，仅过滤 Raw
+			Username: c.Username, ServiceID: c.ServiceID,
+			IfconfigPush: c.IfconfigPush, Iroutes: c.Iroutes, PushRoutes: c.PushRoutes,
+			DNS: c.DNS, ProxyMode: c.ProxyMode, Raw: ccdSafeRaw(c.Raw),
+			ExtraRoutes: c.ExtraRoutes,
+		}
+	}
 	dir := filepath.Join(instanceDir(svcName), "ccd")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -476,6 +543,9 @@ func WriteCcd(svcName string, c *Ccd) error {
 
 // RemoveCcd 删除用户 CCD 文件
 func RemoveCcd(svcName, username string) error {
+	if !SafeConfigName(username) {
+		return fmt.Errorf("非法的 CCD 用户名：%q", username)
+	}
 	return os.Remove(filepath.Join(instanceDir(svcName), "ccd", username))
 }
 

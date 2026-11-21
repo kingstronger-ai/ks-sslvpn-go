@@ -5,9 +5,11 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base32"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -95,7 +97,7 @@ func RandomPassword(n int) string {
 	return string(out)
 }
 
-// RandomCode 数字验证码
+// RandomCode 数字验证码（保留：部分旧接口/测试仍用）
 func RandomCode(n int) string {
 	s := ""
 	for i := 0; i < n; i++ {
@@ -103,6 +105,34 @@ func RandomCode(n int) string {
 		s += fmt.Sprint(n.Int64())
 	}
 	return s
+}
+
+// RandomAlnumCode 字母数字混合验证码（大写+数字，排除易混淆字符 0/O/1/I）。
+// 用于邮件安全码：8 位时空间约 32^8 ≈ 2^40，远高于纯 6 位数字（10^6），
+// 配合失败锁定后可有效抵御在线枚举。
+func RandomAlnumCode(n int) string {
+	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // 去掉 0/O/1/I
+	if n <= 0 {
+		n = 8
+	}
+	b := make([]byte, n)
+	for i := range b {
+		idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			b[i] = alphabet[0]
+			continue
+		}
+		b[i] = alphabet[idx.Int64()]
+	}
+	return string(b)
+}
+
+// HMACSHA256Hex 返回 key 对 msg 的 HMAC-SHA256 hex。
+// 用于安全码入库：库中只存摘要，明文仅通过邮件下发，库泄露也无法反推验证码。
+func HMACSHA256Hex(key, msg string) string {
+	mac := hmac.New(sha256.New, []byte(key))
+	mac.Write([]byte(msg))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // ---------- TOTP (RFC 6238) ----------

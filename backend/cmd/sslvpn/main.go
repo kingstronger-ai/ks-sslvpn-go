@@ -447,10 +447,16 @@ func main() {
 		webPort = "8443"
 	}
 
-	// API (明文，仅监听本地/容器内)
+	// API (明文)。默认只绑定回环地址，避免容器被裸跑或运维误开端口映射时
+	// 把登录/升级等全部明文 API 暴露到网络。需经反代/内网调用时，显式设置
+	// SSLVPN_API_BIND=0.0.0.0 才监听所有网卡（属主动风险接受）。
+	apiBind := strings.TrimSpace(os.Getenv("SSLVPN_API_BIND"))
+	if apiBind == "" {
+		apiBind = "127.0.0.1"
+	}
 	go func() {
-		srv := &http.Server{Addr: ":" + apiPort, Handler: root, ReadHeaderTimeout: 10 * time.Second}
-		log.Printf("API 服务已启动 :%s", apiPort)
+		srv := &http.Server{Addr: apiBind + ":" + apiPort, Handler: root, ReadHeaderTimeout: 10 * time.Second}
+		log.Printf("API 服务已启动 %s:%s", apiBind, apiPort)
 		log.Fatal(srv.ListenAndServe())
 	}()
 
@@ -475,7 +481,7 @@ func main() {
 			},
 		},
 	}
-	log.Printf("Web 管理界面已启动 https://0.0.0.0:%s （默认账号 admin / ChangeMe）", webPort)
+	log.Printf("Web 管理界面已启动 https://0.0.0.0:%s （首次部署的初始口令见数据卷 initial_admin_password.txt）", webPort)
 	log.Fatal(srvTLS.ListenAndServeTLS("", ""))
 }
 
@@ -539,15 +545,20 @@ func runInit() error {
 	if err := db.Open(dataDir()); err != nil {
 		return err
 	}
-	// 默认管理员
+	// 默认管理员：首次初始化生成随机强口令，不再使用公开默认值 admin/ChangeMe。
+	// 明文口令仅一次性写入仅属主可读的引导文件；日志不打印，避免泄露。
 	var cnt int
 	_ = db.DB.QueryRow(`SELECT COUNT(*) FROM admin`).Scan(&cnt)
 	if cnt == 0 {
-		hash, _ := bcrypt.GenerateFromPassword([]byte("ChangeMe"), bcrypt.DefaultCost)
+		initialPwd := util.RandomPassword(16)
+		hash, _ := bcrypt.GenerateFromPassword([]byte(initialPwd), bcrypt.DefaultCost)
 		if _, err := db.DB.Exec(`INSERT INTO admin(username,password,email,status,super) VALUES('admin',?,'',1,1)`, hash); err != nil {
 			return err
 		}
-		log.Println("已创建默认管理员 admin / ChangeMe")
+		pwdFile := filepath.Join(dataDir(), "initial_admin_password.txt")
+		_ = os.WriteFile(pwdFile, []byte("KSVPN 初始管理员口令（首次登录后请立即修改）\n用户名：admin\n密码："+initialPwd+"\n"), 0o600)
+		_ = os.Chmod(pwdFile, 0o600)
+		log.Printf("已创建管理员 admin，初始随机口令写入 %s（权限 0600），请尽快登录后修改", pwdFile)
 	}
 	// 会话密钥
 	if db.GetSetting("session_secret") == "" {

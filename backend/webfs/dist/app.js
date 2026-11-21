@@ -435,7 +435,7 @@ async function pageUsers(main) {
     <td>${badge(a.status)}</td>
     <td><span class="badge ${["ldap","feishu","sso","dingtalk","wecom"].indexOf(a.auth_type) >= 0 ? "blue" : "gray"}">${authName[a.auth_type] || esc(a.auth_type)}</span></td>
     <td>${a.group_id && groupMap[a.group_id] ? esc(groupMap[a.group_id]) : '<span class="muted">未分配</span>'}</td>
-    <td>${a.expire_date || "永久"}</td>
+    <td>${esc(a.expire_date || "永久")}</td>
     <td class="muted">${esc(a.created_at || "-")}</td>
     <td class="inline" style="flex-wrap:nowrap">
       <a href="javascript:;" class="lk" onclick="userEditModal(${a.id})">编辑</a>
@@ -575,7 +575,7 @@ async function userDetail(id) {
   $app.insertAdjacentHTML("beforeend", `<div class="modal-mask" id="mDetail" onclick="if(event.target===this)closeModal('mDetail')"><div class="modal">
     <h3>用户详情：${esc(a.username)}</h3>
     <p>认证类型：${esc(a.auth_type)}</p><p>邮箱：${esc(a.email || "-")}</p>
-    <p>到期：${a.expire_date || "永久"}</p><p>创建：${esc(a.created_at)}</p>${otp}${on}
+    <p>到期：${esc(a.expire_date || "永久")}</p><p>创建：${esc(a.created_at)}</p>${otp}${on}
     <div class="actions"><button class="primary" onclick="closeModal('mDetail')">关 闭</button></div></div></div>`);
 }
 async function userDownload(id, username) {

@@ -22,6 +22,9 @@ type ClientConfData struct {
 
 // BuildClientConf 渲染用户客户端配置（内联证书模式）
 func BuildClientConf(svcName, username string, d ClientConfData) ([]byte, error) {
+	if !SafeConfigName(username) {
+		return nil, fmt.Errorf("非法的用户名：%q", username)
+	}
 	var err error
 	d.CACert, err = readFile(filepath.Join(PKIDir, "ca.crt"))
 	if err != nil {

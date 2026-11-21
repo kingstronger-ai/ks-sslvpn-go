@@ -159,6 +159,10 @@ func LogVPNServer(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "请指定服务实例名")
 		return
 	}
+	if !validName(name) {
+		util.Fail(w, "服务实例名不合法")
+		return
+	}
 	data, err := os.ReadFile(filepath.Join(vpn.BaseDir, "instance", name, "openvpn.log"))
 	if err != nil {
 		util.OK(w, map[string]string{"log": "(无日志)"})

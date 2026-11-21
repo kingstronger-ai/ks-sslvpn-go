@@ -79,12 +79,32 @@ func AccountList(w http.ResponseWriter, r *http.Request) {
 	util.OK(w, map[string]any{"list": list, "total": len(list)})
 }
 
+// normalizeExpireDate 校验并规范化到期日期：空=永久；否则必须是 YYYY-MM-DD。
+// 防止任意字符串（含 HTML/脚本）入库后被前端渲染造成存储型 XSS。
+func normalizeExpireDate(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", true
+	}
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return "", false
+	}
+	return t.Format("2006-01-02"), true
+}
+
 func AccountAdd(w http.ResponseWriter, r *http.Request) {
 	var a Account
 	if err := util.ReadJSON(r, &a); err != nil || !validName(a.Username) {
 		util.Fail(w, "用户名不合法")
 		return
 	}
+	exp, ok := normalizeExpireDate(a.ExpireDate)
+	if !ok {
+		util.Fail(w, "到期日期格式错误，应为 YYYY-MM-DD")
+		return
+	}
+	a.ExpireDate = exp
 	if a.AuthType == "" {
 		a.AuthType = "local"
 	}
@@ -345,6 +365,12 @@ func AccountUpdate(w http.ResponseWriter, r *http.Request) {
 	if authTypeNoLocalPassword(curAuth) {
 		a.Password = "-"
 	}
+	exp, ok := normalizeExpireDate(a.ExpireDate)
+	if !ok {
+		util.Fail(w, "到期日期格式错误，应为 YYYY-MM-DD")
+		return
+	}
+	a.ExpireDate = exp
 	if _, err := db.DB.Exec(`UPDATE account SET password=?,email=?,login_aliases=?,expire_date=?,group_id=?,status=?,note=?,
 		updated_at=datetime('now','localtime') WHERE id=?`,
 		a.Password, a.Email, normalizeLoginAliases(a.LoginAliases),
@@ -661,6 +687,10 @@ func DownloadUserCfg(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "参数错误")
 		return
 	}
+	if !validName(req.Username) || !vpn.SafeConfigName(req.Username) {
+		util.Fail(w, "用户名不合法")
+		return
+	}
 	svc, err := serviceByName(req.Service)
 	if err != nil {
 		util.Fail(w, "服务实例不存在")
@@ -690,6 +720,10 @@ func RebuildUserCfg(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := util.ReadJSON(r, &req); err != nil || req.Username == "" {
 		util.Fail(w, "参数错误")
+		return
+	}
+	if !validName(req.Username) || !vpn.SafeConfigName(req.Username) {
+		util.Fail(w, "用户名不合法")
 		return
 	}
 	_ = vpn.RevokeUserCert(req.Username)
@@ -773,6 +807,10 @@ func DownloadUserCert(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := util.ReadJSON(r, &req); err != nil || req.Username == "" {
 		util.Fail(w, "参数错误")
+		return
+	}
+	if !validName(req.Username) || !vpn.SafeConfigName(req.Username) {
+		util.Fail(w, "用户名不合法")
 		return
 	}
 	crt, err1 := os.ReadFile(vpn.PKIDir + "/issued/" + req.Username + ".crt")

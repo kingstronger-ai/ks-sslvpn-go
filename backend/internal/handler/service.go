@@ -560,6 +560,10 @@ func CcdAdd(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "参数错误")
 		return
 	}
+	if !validName(c.Username) || !vpn.SafeConfigName(c.Username) {
+		util.Fail(w, "用户名不合法（仅字母数字下划线点减号@）")
+		return
+	}
 	s, err := resolveService("", c.ServiceID)
 	if err != nil {
 		util.Fail(w, "服务实例不存在")
@@ -640,6 +644,12 @@ func CcdCopy(w http.ResponseWriter, r *http.Request) {
 	if err := util.ReadJSON(r, &req); err != nil || req.ID == 0 || len(req.Target) == 0 {
 		util.Fail(w, "参数错误")
 		return
+	}
+	for _, u := range req.Target {
+		if !validName(u) || !vpn.SafeConfigName(u) {
+			util.Fail(w, "目标用户名不合法："+u)
+			return
+		}
 	}
 	var sid int64
 	var ip, ir, pr, dns, raw string
