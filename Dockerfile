@@ -18,6 +18,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
     ln -s /usr/share/easy-rsa/easyrsa /usr/local/bin/easyrsa
 ENV TZ=Asia/Shanghai
+# 安全默认：即便后台误开扫码联调模式，生产镜像也不放行伪造身份；
+# 仅开发环境显式设置 SSLVPN_ALLOW_SSO_MOCK=1 才生效。
+ENV SSLVPN_ALLOW_SSO_MOCK=0
 COPY --from=builder /out/sslvpn /usr/local/bin/sslvpn
 COPY deploy/entrypoint.sh /entrypoint.sh
 # 内置客户端安装包（/downloads 页提供下载；运维可用卷内 /var/lib/sslvpn/downloads 覆盖）

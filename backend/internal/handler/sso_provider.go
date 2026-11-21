@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -107,8 +108,18 @@ func emailDomainAllowed(domainList, email string) bool {
 	return false
 }
 
-// ssoMockEnabled 联调模式：不调用任何第三方接口，用回调 query 里的 mock_* 伪造身份
+// ssoMockAllowed 联调模式的全局闸门：只有进程显式设置 SSLVPN_ALLOW_SSO_MOCK=1 时
+// 后台的 mock 开关才会生效。生产镜像不带该环境变量，即使后台误开 mock 也无法伪造身份。
+func ssoMockAllowed() bool {
+	return strings.TrimSpace(os.Getenv("SSLVPN_ALLOW_SSO_MOCK")) == "1"
+}
+
+// ssoMockEnabled 联调模式：不调用任何第三方接口，用回调 query 里的 mock_* 伪造身份。
+// 必须先过全局闸门（ssoMockAllowed），否则后台开关一律无效。
 func ssoMockEnabled(provider string) bool {
+	if !ssoMockAllowed() {
+		return false
+	}
 	if db.GetSetting("sso_mock_mode") == "1" {
 		return true
 	}

@@ -34,6 +34,8 @@ func TestMain(m *testing.M) {
 // setupSSO 准备一个启用「联调模式」的飞书环境（不真的调用飞书接口）
 func setupSSO(t *testing.T) {
 	t.Helper()
+	// 安全闸门：mock 模式必须进程显式放行（生产镜像不带该变量）。测试需显式开启。
+	t.Setenv("SSLVPN_ALLOW_SSO_MOCK", "1")
 	db.SetSetting("feishu_enabled", "1")
 	db.SetSetting("feishu_mock_mode", "1")
 	db.SetSetting("feishu_email_domain", "example.com")
@@ -41,6 +43,24 @@ func setupSSO(t *testing.T) {
 	if _, err := db.DB.Exec(`INSERT OR IGNORE INTO account(username,password,auth_type,email,group_id,status)
 		VALUES('zhangsan','-','feishu','zs@example.com',0,1)`); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestSSOMockGlobalGate 验证生产防护：后台误开 mock 开关，但进程未显式放行时仍不得生效。
+func TestSSOMockGlobalGate(t *testing.T) {
+	db.SetSetting("feishu_mock_mode", "1")
+	db.SetSetting("sso_mock_mode", "1")
+	defer func() {
+		db.SetSetting("feishu_mock_mode", "0")
+		db.SetSetting("sso_mock_mode", "0")
+	}()
+	t.Setenv("SSLVPN_ALLOW_SSO_MOCK", "0")
+	if ssoMockEnabled(SSOFeishu) {
+		t.Fatal("未放行时 mock 不应生效（生产必须拒绝伪造身份）")
+	}
+	t.Setenv("SSLVPN_ALLOW_SSO_MOCK", "1")
+	if !ssoMockEnabled(SSOFeishu) {
+		t.Fatal("显式放行后 mock 应生效")
 	}
 }
 

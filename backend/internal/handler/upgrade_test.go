@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -180,5 +181,48 @@ func TestUpgradeBackupDeleteRequiresConfirm(t *testing.T) {
 	setupUpgradeEnv(t, "9.9.9", testSHA)
 	if r := callUpgrade(t, UpgradeBackupDelete, "POST", `{"backup_id":"bk-a"}`); r.Code == 1 {
 		t.Fatal("缺少 confirm 不应放行")
+	}
+}
+
+// TestUpgradePackageFallback 备用源必须能被解析、校验并透传给宿主机代理。
+func TestUpgradePackageFallback(t *testing.T) {
+	setupUpgradeEnv(t, "9.9.9", testSHA) // 建立 version.json + status.ini + 环境变量
+	dir := os.Getenv("SSLVPN_UPGRADE_DIR")
+	mf := filepath.Join(dir, "version.json")
+	writeManifest := func(body string) {
+		if err := os.WriteFile(mf, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := `{"version":"9.9.9","released_at":"2026-11-21","sha256":"` + testSHA + `",` +
+		`"package":"https://gitee.com/KingStrongerGee/x.tar.gz",%s}`
+
+	// ① 合法 https 备用源：解析 + Check 响应透传
+	writeManifest(fmt.Sprintf(base, `"package_fallback":"https://github.com/kingstronger-ai/x.tar.gz"`))
+	m, err := fetchManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.PackageFallback != "https://github.com/kingstronger-ai/x.tar.gz" {
+		t.Fatalf("备用源解析错误: %q", m.PackageFallback)
+	}
+	c := callUpgrade(t, UpgradeCheck, "GET", "")
+	if c.Data["package_fallback"] != m.PackageFallback {
+		t.Fatalf("UpgradeCheck 未透传备用源: %+v", c.Data)
+	}
+
+	// ② 与主源相同 → 去重为空，避免代理重复下载
+	writeManifest(fmt.Sprintf(base, `"package_fallback":"https://gitee.com/KingStrongerGee/x.tar.gz"`))
+	m, err = fetchManifest()
+	if err != nil || m.PackageFallback != "" {
+		t.Fatalf("相同备用源应去重: %q err=%v", m.PackageFallback, err)
+	}
+
+	// ③ 非 https / 明文 http 备用源一律拒绝（防降级与本地路径误配）
+	for _, bad := range []string{`"package_fallback":"/opt/x.tar.gz"`, `"package_fallback":"http://example.com/x.tar.gz"`} {
+		writeManifest(fmt.Sprintf(base, bad))
+		if _, err := fetchManifest(); err == nil {
+			t.Errorf("非法备用源应被拒绝: %s", bad)
+		}
 	}
 }

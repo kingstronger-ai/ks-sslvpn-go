@@ -2,7 +2,6 @@
 package vpn
 
 import (
-	"crypto/tls"
 	"database/sql"
 	"fmt"
 	"strconv"
@@ -23,9 +22,9 @@ func LDAPBindCheck(username, password string) bool {
 
 	var server string
 	var port int
-	var bindDN, bindPass, baseDN, ou, filter, disabledFilter string
-	err = d.QueryRow(`SELECT server,port,bind_dn,bind_pass,base_dn,ou,filter,disabled_filter FROM ldap_conf WHERE id=1`).
-		Scan(&server, &port, &bindDN, &bindPass, &baseDN, &ou, &filter, &disabledFilter)
+	var bindDN, bindPass, baseDN, ou, filter, disabledFilter, tlsMode, caCert, tlsServerName string
+	err = d.QueryRow(`SELECT server,port,bind_dn,bind_pass,base_dn,ou,filter,disabled_filter,tls_mode,ca_cert,tls_server_name FROM ldap_conf WHERE id=1`).
+		Scan(&server, &port, &bindDN, &bindPass, &baseDN, &ou, &filter, &disabledFilter, &tlsMode, &caCert, &tlsServerName)
 	if err != nil || server == "" {
 		return false
 	}
@@ -33,18 +32,36 @@ func LDAPBindCheck(username, password string) bool {
 		filter = "(uid=%s)"
 	}
 	// 兼容 "ldap://10.0.0.1"、"ldaps://host:636"、尾部斜杠等写法
+	serverRaw := server
 	server = normalizeLDAPAddr(server, &port)
 
 	scheme := "ldap://"
-	if port == 636 {
+	if port == 636 || strings.HasPrefix(strings.ToLower(strings.TrimSpace(serverRaw)), "ldaps://") {
 		scheme = "ldaps://"
 	}
-	conn, err := goldap.DialURL(scheme+fmt.Sprintf("%s:%d", server, port),
-		goldap.DialWithTLSConfig(&tls.Config{InsecureSkipVerify: true}))
+	// 与 handler 路径共用同一套 TLS 规则：明文端口 + 校验模式强制 StartTLS，
+	// 避免"以为在校验、实则明文传管理员密码"。
+	mode := strings.ToLower(strings.TrimSpace(tlsMode))
+	if mode == "" {
+		mode = "insecure"
+	}
+	if mode == "starttls" && scheme == "ldaps://" {
+		return false
+	}
+	cfg, err := ldaputil.TLSConfig(ldaputil.VerifyMode(tlsMode, caCert), caCert, tlsServerName, server)
+	if err != nil {
+		return false
+	}
+	conn, err := goldap.DialURL(scheme+fmt.Sprintf("%s:%d", server, port), goldap.DialWithTLSConfig(cfg))
 	if err != nil {
 		return false
 	}
 	defer conn.Close()
+	if scheme != "ldaps://" && (mode == "system" || mode == "custom" || mode == "starttls") {
+		if err := conn.StartTLS(cfg); err != nil {
+			return false
+		}
+	}
 	if err := conn.Bind(bindDN, bindPass); err != nil {
 		return false
 	}
@@ -53,7 +70,8 @@ func LDAPBindCheck(username, password string) bool {
 	if ou != "" {
 		searchBase = fmt.Sprintf("ou=%s,%s", ou, baseDN)
 	}
-	f := strings.ReplaceAll(filter, "%s", username)
+	// 用户名转义，防止 )(&| 等字符篡改过滤器、绕过停用判定。
+	f := strings.ReplaceAll(filter, "%s", goldap.EscapeFilter(username))
 	attrs := append([]string{"dn"}, ldaputil.DisabledAttrs...)
 	req := goldap.NewSearchRequest(searchBase, goldap.ScopeWholeSubtree, goldap.NeverDerefAliases,
 		1, 10, false, f, attrs, nil)

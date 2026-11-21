@@ -13,8 +13,10 @@ import (
 	"sslvpn/internal/ldaputil"
 )
 
-func tlsCfg() *tls.Config {
-	return &tls.Config{InsecureSkipVerify: true} // 内网自签场景
+// ldapTLSConfig 为共享 ldaputil.TLSConfig 的包内薄包装（保留历史测试入口）。
+// 证书校验逻辑下沉到 ldaputil，handler 与 vpn 两条 LDAP 认证路径共用同一套规则。
+func ldapTLSConfig(verifyMode, caCert, serverName, host string) (*tls.Config, error) {
+	return ldaputil.TLSConfig(verifyMode, caCert, serverName, host)
 }
 
 type ldapClient struct {
@@ -27,7 +29,7 @@ type ldapClient struct {
 	disabledFilter string // 可选：命中该过滤器的 LDAP 账号视为停用（保留账号式 OpenLDAP）
 }
 
-func newLDAPClient(server string, port int, bindDN, bindPass, baseDN, ou, filter, disabledFilter string) (ldapClient, error) {
+func newLDAPClient(server string, port int, bindDN, bindPass, baseDN, ou, filter, disabledFilter, tlsMode, caCert, tlsServerName string) (ldapClient, error) {
 	scheme := "ldap://"
 	if port == 636 {
 		scheme = "ldaps://"
@@ -51,9 +53,28 @@ func newLDAPClient(server string, port int, bindDN, bindPass, baseDN, ou, filter
 	if host == "" {
 		return ldapClient{}, fmt.Errorf("LDAP 服务器地址为空")
 	}
-	conn, err := goldap.DialURL(scheme+fmt.Sprintf("%s:%d", host, port), goldap.DialWithTLSConfig(tlsCfg()))
+	mode := strings.ToLower(strings.TrimSpace(tlsMode))
+	if mode == "" {
+		mode = "insecure"
+	}
+	if mode == "starttls" && scheme == "ldaps://" {
+		return ldapClient{}, fmt.Errorf("tls_mode=starttls 不能与 ldaps:// 同时使用")
+	}
+	verifyMode := ldaputil.VerifyMode(tlsMode, caCert)
+	cfg, err := ldapTLSConfig(verifyMode, caCert, tlsServerName, host)
 	if err != nil {
 		return ldapClient{}, err
+	}
+	conn, err := goldap.DialURL(scheme+fmt.Sprintf("%s:%d", host, port), goldap.DialWithTLSConfig(cfg))
+	if err != nil {
+		return ldapClient{}, err
+	}
+	// 证书校验模式若仍走明文端口，强制 StartTLS，避免"以为在校验、实则明文传管理员密码"。
+	if scheme != "ldaps://" && (mode == "system" || mode == "custom" || mode == "starttls") {
+		if err := conn.StartTLS(cfg); err != nil {
+			conn.Close()
+			return ldapClient{}, fmt.Errorf("StartTLS 失败: %w", err)
+		}
 	}
 	if err := conn.Bind(bindDN, bindPass); err != nil {
 		conn.Close()
@@ -62,7 +83,11 @@ func newLDAPClient(server string, port int, bindDN, bindPass, baseDN, ou, filter
 	return ldapClient{conn: conn, baseDN: baseDN, ou: ou, filter: filter, bindDN: bindDN, bindPass: bindPass, disabledFilter: disabledFilter}, nil
 }
 
-func (c *ldapClient) Close() { c.conn.Close() }
+func (c *ldapClient) Close() {
+	if c != nil && c.conn != nil {
+		c.conn.Close()
+	}
+}
 
 func (c *ldapClient) searchBase() string {
 	if c.ou != "" {
@@ -71,26 +96,47 @@ func (c *ldapClient) searchBase() string {
 	return c.baseDN
 }
 
-// BindCheck 用管理员查找用户 DN 后以用户密码二次绑定验证
+// BindCheck 用管理员查找用户 DN 后以用户密码二次绑定验证。
+// bind 前必须完成停用检查（属性标记 + 自定义停用过滤器），否则"属性停用但目录仍允许 bind"的账号可绕过拦截。
 func (c *ldapClient) BindCheck(username, password string) error {
-	f := strings.ReplaceAll(c.filter, "%s", username)
+	// 用户名先做 LDAP 过滤器转义，防止 )(&| 等字符篡改查询条件、绕过停用判定。
+	f := strings.ReplaceAll(c.filter, "%s", goldap.EscapeFilter(username))
+	// 必须请求停用判定属性；只查 dn 会让 EntryDisabled 恒为 false。
+	attrs := append([]string{}, ldaputil.DisabledAttrs...)
 	req := goldap.NewSearchRequest(c.searchBase(), goldap.ScopeWholeSubtree, goldap.NeverDerefAliases,
-		1, 10, false, f, []string{"dn"}, nil)
+		3, 10, false, f, attrs, nil)
 	res, err := c.conn.Search(req)
 	if err != nil {
 		return err
 	}
-	if len(res.Entries) == 0 {
-		// 兜底：在 base_dn 全局搜
+	if len(res.Entries) == 0 && c.ou != "" {
 		req.BaseDN = c.baseDN
-		if res, err = c.conn.Search(req); err != nil || len(res.Entries) == 0 {
-			return fmt.Errorf("用户不存在")
+		if res, err = c.conn.Search(req); err != nil {
+			return err
 		}
 	}
-	userDN := res.Entries[0].DN
-	// AD 保留账号式停用：bind 前检查属性标记（UAC 禁用位/账号过期/锁定等），命中直接拒绝。
-	if ldaputil.EntryDisabled(res.Entries[0]) {
-		return fmt.Errorf("账号已被停用")
+	if len(res.Entries) == 0 {
+		return fmt.Errorf("用户不存在")
+	}
+	// 对每一条命中记录都做停用判定：任一命中即拒绝，避免同名多条时只查首条被绕过。
+	var userDN string
+	for _, entry := range res.Entries {
+		// ① 标准属性标记（UAC 禁用位/账号过期/锁定、ppolicy、nsAccountLock 等）
+		if ldaputil.EntryDisabled(entry) {
+			return fmt.Errorf("账号已被停用")
+		}
+		// ② 自定义停用过滤器：base scope 已锁定该 DN，只需独立 df。
+		//    不能拼进用户名属性条件 f，否则用户名属性与停用过滤器属性不同时会漏判。
+		if df := strings.TrimSpace(c.disabledFilter); df != "" {
+			check := goldap.NewSearchRequest(entry.DN, goldap.ScopeBaseObject, goldap.NeverDerefAliases,
+				1, 5, false, df, []string{"dn"}, nil)
+			if cre, cerr := c.conn.Search(check); cerr == nil && len(cre.Entries) > 0 {
+				return fmt.Errorf("账号已被停用")
+			}
+		}
+		if userDN == "" {
+			userDN = entry.DN
+		}
 	}
 	return c.conn.Bind(userDN, password)
 }
@@ -156,18 +202,32 @@ func ldapEntryDisabled(e *goldap.Entry) bool { return ldaputil.EntryDisabled(e) 
 func (c *ldapClient) ListUsersDetail() ([]LdapUser, error) {
 	attr := ldaputil.UsernameAttr(c.filter)
 	attrs := append([]string{attr, "cn", "sn", "mail", "sAMAccountName", "userPrincipalName"}, ldaputil.DisabledAttrs...)
-	req := goldap.NewSearchRequest(c.searchBase(), goldap.ScopeWholeSubtree, goldap.NeverDerefAliases,
+	base := c.searchBase()
+	req := goldap.NewSearchRequest(base, goldap.ScopeWholeSubtree, goldap.NeverDerefAliases,
 		0, 0, false, "("+attr+"=*)", attrs, nil)
 	res, err := c.searchAll(req)
+	// OU 配错时回退到 base_dn 全库，与 SearchFilter 行为一致；
+	// 否则空列表会被同步侧误判为"全员删号"，进而批量禁用本地账号。
+	if err != nil && c.ou != "" {
+		req.BaseDN = c.baseDN
+		res, err = c.searchAll(req)
+	}
 	if err != nil {
 		return nil, err
 	}
+	if len(res.Entries) == 0 && c.ou != "" {
+		req.BaseDN = c.baseDN
+		if fallback, fe := c.searchAll(req); fe == nil {
+			res = fallback
+		}
+	}
+	base = req.BaseDN // 后续自定义停用过滤器查询使用同一搜索基
 
 	// 自定义停用过滤器：命中该过滤器的账号用户名集合（保留账号式 OpenLDAP/AD 的兜底判定）。
 	// 查询失败不阻断主流程；返回属性按所有常见身份字段收集，与主列表用户名比对。
 	customDisabled := map[string]bool{}
 	if strings.TrimSpace(c.disabledFilter) != "" {
-		dreq := goldap.NewSearchRequest(c.searchBase(), goldap.ScopeWholeSubtree,
+		dreq := goldap.NewSearchRequest(base, goldap.ScopeWholeSubtree,
 			goldap.NeverDerefAliases, 0, 0, false, c.disabledFilter,
 			[]string{"uid", "cn", "sn", "mail", "sAMAccountName", "userPrincipalName"}, nil)
 		if dre, derr := c.searchAll(dreq); derr == nil {

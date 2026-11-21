@@ -829,6 +829,21 @@ async function pageLdap(main) {
       若目录用了自定义标记，可填一个 LDAP 过滤器，命中它的账号同步时自动禁用、登录时也会被拒绝。<br>
       示例：<code>(employeeStatus=disabled)</code> 自定义属性 · <code>(pwdAccountLockedTime=*)</code> ppolicy 锁定 · <code>(nsAccountLock=TRUE)</code> 389DS。</div>
     </div></div>
+    <div class="form-row"><label>加密方式 <span class="hint">LDAPS / StartTLS</span></label><div>
+      <select id="ldTlsMode" onchange="ldapTlsChanged()">
+        <option value="" ${!c.tls_mode ? "selected" : ""}>明文 LDAP（端口 389，不加密）</option>
+        <option value="insecure" ${(c.tls_mode || "") === "insecure" ? "selected" : ""}>LDAPS，不校验证书（自签，有中间人风险）</option>
+        <option value="system" ${c.tls_mode === "system" ? "selected" : ""}>LDAPS，校验证书（系统根证书）</option>
+        <option value="custom" ${c.tls_mode === "custom" ? "selected" : ""}>LDAPS，校验证书（自填 CA）</option>
+        <option value="starttls" ${c.tls_mode === "starttls" ? "selected" : ""}>StartTLS，校验证书（端口 389）</option>
+      </select>
+      <div class="muted" style="margin-top:4px">⚠ 默认「明文」保留旧行为；生产环境建议选 <b>system</b> 或 <b>custom</b>，否则管理员密码与全体用户密码在传输中可被中间人窃取。<br>
+      端口填 <code>636</code> 走 LDAPS；端口 389 且选了校验证书时会自动 StartTLS。<code>starttls</code> 模式不可与 636 同用。</div>
+    </div></div>
+    <div class="form-row" id="ldCaRow"><label>CA 证书 (PEM)</label><textarea id="ldCa" rows="4" placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----">${esc(c.ca_cert || "")}</textarea></div>
+    <div class="form-row"><label>证书域名 SNI <span class="hint">可选</span></label><div>
+      <input id="ldSni" value="${esc(c.tls_server_name || "")}" placeholder="dc.example.com（证书名与服务器地址不一致时填）">
+    </div></div>
     <div class="form-row"><label></label><div class="inline">
       <button class="primary" onclick="ldapSave()">✓ 更新</button>
       <button class="green" onclick="ldapTest()">🔗 测试连接</button>
@@ -851,6 +866,11 @@ async function pageLdap(main) {
     <div class="muted" style="font-size:12px;line-height:1.7">ⓘ 别名在「用户账号 → 添加/编辑用户 → 登录别名」逐账号填写，逗号分隔可填多个。短账号与 DN 常无字符串对应关系，系统<b>不做前缀推导</b>，必须显式配置；显式别名优先于联系邮箱，可绕开邮箱重复带来的歧义。</div>
   </div>`;
   await loginAliasLoad();
+  ldapTlsChanged();
+}
+function ldapTlsChanged() {
+  const m = document.getElementById("ldTlsMode"), row = document.getElementById("ldCaRow");
+  if (m && row) row.style.display = (m.value === "custom") ? "" : "none";
 }
 async function loginAliasLoad() {
   const r = await api("/system/loginAlias/get");
@@ -870,12 +890,14 @@ async function loginAliasSave() {
 async function ldapSave() {
   const r = await api("/ldap/update", { body: { server: fv("ldServer"), port: +fv("ldPort"),
     bind_dn: fv("ldBind"), bind_pass: fv("ldPass"), base_dn: fv("ldBase"),
-    ou: fv("ldOU"), filter: fv("ldFilter"), disabled_filter: fv("ldDisabledFilter"), enabled: 1 } });
+    ou: fv("ldOU"), filter: fv("ldFilter"), disabled_filter: fv("ldDisabledFilter"),
+    tls_mode: fv("ldTlsMode"), ca_cert: fv("ldCa"), tls_server_name: fv("ldSni"), enabled: 1 } });
   toast(r.msg, r.code === 1);
 }
 function ldapClear() {
-  ["ldServer", "ldBase", "ldBind", "ldPass", "ldOU", "ldDisabledFilter"].forEach(id => { const el = document.getElementById(id); if (el) el.value = ""; });
+  ["ldServer", "ldBase", "ldBind", "ldPass", "ldOU", "ldDisabledFilter", "ldCa", "ldSni"].forEach(id => { const el = document.getElementById(id); if (el) el.value = ""; });
   const f = document.getElementById("ldFilter"); if (f) f.value = "(uid=%s)";
+  const t = document.getElementById("ldTlsMode"); if (t) { t.value = ""; ldapTlsChanged(); }
   toast("已清空表单（未保存）");
 }
 async function ldapTest() {

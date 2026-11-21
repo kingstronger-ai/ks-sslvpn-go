@@ -593,20 +593,25 @@ func FWAddRule(w http.ResponseWriter, r *http.Request) {
 
 func LdapGet(w http.ResponseWriter, r *http.Request) {
 	var row struct {
-		Server   string
-		Port     int
-		BindDN   string
-		BindPass string
-		BaseDN   string
-		OU       string
-		Filter   string
-		Enabled  int
+		Server        string
+		Port          int
+		BindDN        string
+		BindPass      string
+		BaseDN        string
+		OU            string
+		Filter        string
+		Enabled       int
+		TLSMode       string
+		CACert        string
+		TLSServerName string
 	}
 	var disabledFilter string
-	err := db.DB.QueryRow(`SELECT server,port,bind_dn,bind_pass,base_dn,ou,filter,enabled,disabled_filter FROM ldap_conf WHERE id=1`).
-		Scan(&row.Server, &row.Port, &row.BindDN, &row.BindPass, &row.BaseDN, &row.OU, &row.Filter, &row.Enabled, &disabledFilter)
+	err := db.DB.QueryRow(`SELECT server,port,bind_dn,bind_pass,base_dn,ou,filter,enabled,disabled_filter,tls_mode,ca_cert,tls_server_name FROM ldap_conf WHERE id=1`).
+		Scan(&row.Server, &row.Port, &row.BindDN, &row.BindPass, &row.BaseDN, &row.OU, &row.Filter, &row.Enabled, &disabledFilter,
+			&row.TLSMode, &row.CACert, &row.TLSServerName)
 	if err == sql.ErrNoRows {
-		util.OK(w, map[string]any{"enabled": 0, "filter": "(uid=%s)", "port": 389, "disabled_filter": ""})
+		util.OK(w, map[string]any{"enabled": 0, "filter": "(uid=%s)", "port": 389, "disabled_filter": "",
+			"tls_mode": "", "ca_cert": "", "tls_server_name": ""})
 		return
 	}
 	if err != nil {
@@ -616,7 +621,8 @@ func LdapGet(w http.ResponseWriter, r *http.Request) {
 	util.OK(w, map[string]any{
 		"server": row.Server, "port": row.Port, "bind_dn": row.BindDN, "bind_pass": row.BindPass,
 		"base_dn": row.BaseDN, "ou": row.OU, "filter": row.Filter, "enabled": row.Enabled,
-		"disabled_filter": disabledFilter,
+		"disabled_filter": disabledFilter, "tls_mode": row.TLSMode, "ca_cert": row.CACert,
+		"tls_server_name": row.TLSServerName,
 	})
 }
 
@@ -624,15 +630,18 @@ func LdapSet(w http.ResponseWriter, r *http.Request) { LdapUpdate(w, r) }
 
 func LdapUpdate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Server   string `json:"server"`
-		Port     int    `json:"port"`
-		BindDN   string `json:"bind_dn"`
-		BindPass string `json:"bind_pass"`
-		BaseDN   string `json:"base_dn"`
+		Server         string `json:"server"`
+		Port           int    `json:"port"`
+		BindDN         string `json:"bind_dn"`
+		BindPass       string `json:"bind_pass"`
+		BaseDN         string `json:"base_dn"`
 		OU             string `json:"ou"`
 		Filter         string `json:"filter"`
 		Enabled        int    `json:"enabled"`
 		DisabledFilter string `json:"disabled_filter"`
+		TLSMode        string `json:"tls_mode"`
+		CACert         string `json:"ca_cert"`
+		TLSServerName  string `json:"tls_server_name"`
 	}
 	if err := util.ReadJSON(r, &req); err != nil {
 		util.Fail(w, "参数错误")
@@ -644,12 +653,20 @@ func LdapUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.Port == 0 {
 		req.Port = 389
 	}
-	if _, err := db.DB.Exec(`INSERT INTO ldap_conf(id,server,port,bind_dn,bind_pass,base_dn,ou,filter,enabled,disabled_filter)
-		VALUES(1,?,?,?,?,?,?,?,?,?)
+	// TLS 模式白名单：拒绝未知值，避免拼写错误导致证书校验被静默降级。
+	switch strings.ToLower(strings.TrimSpace(req.TLSMode)) {
+	case "", "insecure", "system", "custom", "starttls":
+	default:
+		util.Fail(w, "tls_mode 不合法（可选 insecure/system/custom/starttls）")
+		return
+	}
+	if _, err := db.DB.Exec(`INSERT INTO ldap_conf(id,server,port,bind_dn,bind_pass,base_dn,ou,filter,enabled,disabled_filter,tls_mode,ca_cert,tls_server_name)
+		VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET server=excluded.server,port=excluded.port,bind_dn=excluded.bind_dn,
 		bind_pass=excluded.bind_pass,base_dn=excluded.base_dn,ou=excluded.ou,filter=excluded.filter,enabled=excluded.enabled,
-		disabled_filter=excluded.disabled_filter`,
-		req.Server, req.Port, req.BindDN, req.BindPass, req.BaseDN, req.OU, req.Filter, req.Enabled, req.DisabledFilter); err != nil {
+		disabled_filter=excluded.disabled_filter,tls_mode=excluded.tls_mode,ca_cert=excluded.ca_cert,tls_server_name=excluded.tls_server_name`,
+		req.Server, req.Port, req.BindDN, req.BindPass, req.BaseDN, req.OU, req.Filter, req.Enabled, req.DisabledFilter,
+		req.TLSMode, req.CACert, req.TLSServerName); err != nil {
 		util.Fail(w, "保存失败")
 		return
 	}
@@ -660,16 +677,16 @@ func LdapUpdate(w http.ResponseWriter, r *http.Request) {
 func ldapConnect() (ldapClient, error) {
 	var server string
 	var port int
-	var bindDN, bindPass, baseDN, ou, filter, disabledFilter string
-	err := db.DB.QueryRow(`SELECT server,port,bind_dn,bind_pass,base_dn,ou,filter,disabled_filter FROM ldap_conf WHERE id=1`).
-		Scan(&server, &port, &bindDN, &bindPass, &baseDN, &ou, &filter, &disabledFilter)
+	var bindDN, bindPass, baseDN, ou, filter, disabledFilter, tlsMode, caCert, tlsServerName string
+	err := db.DB.QueryRow(`SELECT server,port,bind_dn,bind_pass,base_dn,ou,filter,disabled_filter,tls_mode,ca_cert,tls_server_name FROM ldap_conf WHERE id=1`).
+		Scan(&server, &port, &bindDN, &bindPass, &baseDN, &ou, &filter, &disabledFilter, &tlsMode, &caCert, &tlsServerName)
 	if err != nil {
 		return ldapClient{}, fmt.Errorf("LDAP 未配置")
 	}
 	if filter == "" {
 		filter = "(uid=%s)"
 	}
-	return newLDAPClient(server, port, bindDN, bindPass, baseDN, ou, filter, disabledFilter)
+	return newLDAPClient(server, port, bindDN, bindPass, baseDN, ou, filter, disabledFilter, tlsMode, caCert, tlsServerName)
 }
 
 func LdapTest(w http.ResponseWriter, r *http.Request) {
@@ -731,6 +748,21 @@ func reconcileLDAPStatus(users []LdapUser) (disabled, enabled int, err error) {
 		}
 	}
 	_ = rows.Close()
+	// 熔断：OU 配错/同步源异常导致目录用户数骤降时，禁止批量误禁用本地账号。
+	// 正常运维极少一次性禁用 40% 以上账号；触发即整批跳过并留下审计。
+	enabledLocal, willDisable := 0, 0
+	for _, a := range locals {
+		if a.status == 1 {
+			enabledLocal++
+			if !present[strings.ToLower(a.name)] {
+				willDisable++
+			}
+		}
+	}
+	if enabledLocal >= 5 && float64(willDisable)/float64(enabledLocal) > 0.4 {
+		return 0, 0, fmt.Errorf("LDAP 用户数异常（本地启用 %d，本次将禁用 %d，占 %.0f%%），疑似 OU/连接配置错误，已跳过状态同步以防批量误禁用",
+			enabledLocal, willDisable, float64(willDisable)/float64(enabledLocal)*100)
+	}
 	for _, a := range locals {
 		want := 0
 		if present[strings.ToLower(a.name)] {
@@ -892,8 +924,12 @@ func LdapImport(w http.ResponseWriter, r *http.Request) {
 			quotaFull++
 			continue
 		}
-		if _, err := db.DB.Exec(`INSERT INTO account(username,password,auth_type,email,group_id,status,created_at) VALUES(?,?,?,?,?,1,datetime('now','localtime'))`,
-			u.Username, "-", "ldap", u.Email, req.GroupID); err == nil {
+		status := 1
+		if u.Disabled {
+			status = 0 // LDAP 侧已标记停用的账号，导入后保持禁用，不允许绕过拦截登录
+		}
+		if _, err := db.DB.Exec(`INSERT INTO account(username,password,auth_type,email,group_id,status,created_at) VALUES(?,?,?,?,?,?,datetime('now','localtime'))`,
+			u.Username, "-", "ldap", u.Email, req.GroupID, status); err == nil {
 			used++
 			_ = vpn.IssueUserCert(u.Username)
 			added++

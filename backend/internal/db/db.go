@@ -173,7 +173,10 @@ func migrate() error {
 			ou TEXT DEFAULT '',
 			filter TEXT DEFAULT '(uid=%s)',
 			enabled INTEGER DEFAULT 0,
-			disabled_filter TEXT DEFAULT '')`,
+			disabled_filter TEXT DEFAULT '',
+			tls_mode TEXT DEFAULT '',
+			ca_cert TEXT DEFAULT '',
+			tls_server_name TEXT DEFAULT '')`,
 		// 备份记录
 		`CREATE TABLE IF NOT EXISTS backup(
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -241,6 +244,11 @@ func migrate() error {
 		{"account", "login_aliases", "TEXT DEFAULT ''"},
 		// LDAP 停用账号判定过滤器（保留账号、用属性标记停用的 OpenLDAP 需要）
 		{"ldap_conf", "disabled_filter", "TEXT DEFAULT ''"},
+		// LDAPS/StartTLS 证书校验配置。tls_mode 空/insecure=兼容旧行为（不校验），
+		// system=系统根证书，custom=ca_cert 自签 CA；tls_server_name 用于证书名与连接地址不一致时覆盖 SNI。
+		{"ldap_conf", "tls_mode", "TEXT DEFAULT ''"},
+		{"ldap_conf", "ca_cert", "TEXT DEFAULT ''"},
+		{"ldap_conf", "tls_server_name", "TEXT DEFAULT ''"},
 	} {
 		if err := ensureColumn(c[0], c[1], c[2]); err != nil {
 			return err

@@ -171,3 +171,31 @@ func TestReconcileLDAPStatusCaseInsensitive(t *testing.T) {
 		t.Errorf("AD 大小写差异不应误禁用，实际 status=%d", got)
 	}
 }
+
+// TestReconcileLDAPStatusCircuitBreaker OU 配错导致目录只返回极少用户时，
+// 必须整批跳过状态同步，不能把绝大多数本地账号一次性禁用。
+func TestReconcileLDAPStatusCircuitBreaker(t *testing.T) {
+	names := []string{"ldap_cb_1", "ldap_cb_2", "ldap_cb_3", "ldap_cb_4", "ldap_cb_5", "ldap_cb_6"}
+	defer func() {
+		for _, n := range names {
+			_, _ = db.DB.Exec(`DELETE FROM account WHERE username=?`, n)
+		}
+	}()
+	for _, n := range names {
+		if _, err := db.DB.Exec(`DELETE FROM account WHERE username=?`, n); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.DB.Exec(`INSERT INTO account(username,password,auth_type,status) VALUES(?,'-','ldap',1)`, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 目录只返回 1 个 → 5/6 账号将被禁用，超过 40% 熔断阈值
+	if _, _, err := reconcileLDAPStatus([]LdapUser{{Username: "ldap_cb_1", Disabled: false}}); err == nil {
+		t.Fatal("用户数骤降时应熔断并返回错误")
+	}
+	for _, n := range names {
+		if got := statusOf(t, n); got != 1 {
+			t.Errorf("熔断后账号 %s 不应被改动，实际 status=%d", n, got)
+		}
+	}
+}

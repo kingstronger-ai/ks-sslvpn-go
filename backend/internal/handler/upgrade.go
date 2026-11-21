@@ -87,12 +87,13 @@ func safeUpdateRef(ref string) error {
 }
 
 type updateManifest struct {
-	Version    string `json:"version"`
-	ReleasedAt string `json:"released_at"`
-	Notes      string `json:"notes"`
-	Package    string `json:"package"` // http(s) URL 或宿主机上的包绝对路径
-	Sha256     string `json:"sha256"`
-	MinVersion string `json:"min_version"`
+	Version         string `json:"version"`
+	ReleasedAt      string `json:"released_at"`
+	Notes           string `json:"notes"`
+	Package         string `json:"package"`          // 主源：https URL 或宿主机上的包绝对路径
+	PackageFallback string `json:"package_fallback"` // 备用源：主源不可达时由代理自动切换，必须为 https
+	Sha256          string `json:"sha256"`
+	MinVersion      string `json:"min_version"`
 }
 
 // fetchManifest 由服务端自行读取更新源；apply 时绝不采信前端传来的下载地址，
@@ -136,6 +137,7 @@ func fetchManifest() (*updateManifest, error) {
 		return nil, errors.New("更新源缺少合法的 version 字段")
 	}
 	m.Package = strings.TrimSpace(m.Package)
+	m.PackageFallback = strings.TrimSpace(m.PackageFallback)
 	m.Sha256 = strings.ToLower(strings.TrimSpace(m.Sha256))
 	m.MinVersion = strings.TrimSpace(m.MinVersion)
 	m.Notes = strings.TrimSpace(m.Notes)
@@ -143,6 +145,18 @@ func fetchManifest() (*updateManifest, error) {
 	if m.Package != "" {
 		if err := safeUpdateRef(m.Package); err != nil {
 			return nil, fmt.Errorf("升级包地址不安全：%w", err)
+		}
+	}
+	if m.PackageFallback != "" {
+		if err := safeUpdateRef(m.PackageFallback); err != nil {
+			return nil, fmt.Errorf("备用升级包地址不安全：%w", err)
+		}
+		// 备用源必须可公开直链下载，本地路径没有"主源失败后切换"的意义。
+		if !strings.HasPrefix(strings.ToLower(m.PackageFallback), "https://") {
+			return nil, errors.New("备用升级包地址必须是 https://")
+		}
+		if m.PackageFallback == m.Package {
+			m.PackageFallback = "" // 与主源相同则去重，避免代理重复下载
 		}
 	}
 	return &m, nil
@@ -263,17 +277,18 @@ func UpgradeCheck(w http.ResponseWriter, r *http.Request) {
 	newer := version.IsNewer(m.Version, version.Version)
 	compatible := m.MinVersion == "" || version.Compare(version.Version, m.MinVersion) >= 0
 	util.OK(w, map[string]any{
-		"current":      version.Version,
-		"latest":       m.Version,
-		"has_update":   newer,
-		"released_at":  m.ReleasedAt,
-		"notes":        m.Notes,
-		"package":      m.Package,
-		"sha256":       m.Sha256,
-		"min_version":  m.MinVersion,
-		"compatible":   compatible,
-		"ready":        newer && compatible && m.Package != "" && validSHA256(m.Sha256) && agentOnline(),
-		"agent_online": agentOnline(),
+		"current":          version.Version,
+		"latest":           m.Version,
+		"has_update":       newer,
+		"released_at":      m.ReleasedAt,
+		"notes":            m.Notes,
+		"package":          m.Package,
+		"package_fallback": m.PackageFallback,
+		"sha256":           m.Sha256,
+		"min_version":      m.MinVersion,
+		"compatible":       compatible,
+		"ready":            newer && compatible && m.Package != "" && validSHA256(m.Sha256) && agentOnline(),
+		"agent_online":     agentOnline(),
 	})
 }
 
@@ -315,12 +330,13 @@ func UpgradeApply(w http.ResponseWriter, r *http.Request) {
 	}
 	id := strconv.FormatInt(time.Now().UnixNano(), 10)
 	if err := writeRequest(map[string]string{
-		"id":           id,
-		"action":       "upgrade",
-		"version":      m.Version,
-		"package":      m.Package,
-		"sha256":       m.Sha256,
-		"requested_at": time.Now().Format(time.RFC3339),
+		"id":               id,
+		"action":           "upgrade",
+		"version":          m.Version,
+		"package":          m.Package,
+		"package_fallback": m.PackageFallback,
+		"sha256":           m.Sha256,
+		"requested_at":     time.Now().Format(time.RFC3339),
 	}); err != nil {
 		util.Fail(w, "写入升级请求失败："+err.Error())
 		return

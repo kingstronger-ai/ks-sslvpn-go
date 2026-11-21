@@ -196,7 +196,7 @@ rollback_and_fail() {
 
 # ---------- 升级 ----------
 do_upgrade() {
-  local rid="$1" ver="$2" pkg="$3" sha="$4"
+  local rid="$1" ver="$2" pkg="$3" sha="$4" fallback_pkg="${5:-}"
   local bid="bk-$(date +%Y%m%d-%H%M%S)" localpkg top newver
   CUR_ID="$rid"
   logline "收到升级请求 id=$rid 目标版本 $ver"
@@ -211,7 +211,9 @@ do_upgrade() {
     return 1
   fi
 
-  # ② 取包：仅 https 下载（明文 http 可被中间人替换为恶意包 -> 宿主机 root），
+  # ② 取包：主源失败自动切备用源；每个源下载后立即校验 sha256，
+  #    校验不通过的包直接丢弃并切下一个源（被劫持的源无法污染升级）。
+  #    仅 https 下载（明文 http 可被中间人替换为恶意包 -> 宿主机 root），
   #    否则视为宿主机本地绝对路径。rid 由容器以 UnixNano 生成，此处再白名单校验防路径注入。
   set_status "downloading" 25 "正在获取升级包"
   case "$rid" in
@@ -222,8 +224,26 @@ do_upgrade() {
     return 1
   elif [[ "$pkg" == https://* ]]; then
     localpkg="$WORK/packages/$rid.tar.gz"
-    if ! curl -fL --retry 2 -o "$localpkg" "$pkg"; then
-      set_status "failed" 25 "下载升级包失败，已中止（源码未改动）"
+    local src downloaded=0
+    for src in "$pkg" "$fallback_pkg"; do
+      [ -z "$src" ] && continue
+      [[ "$src" == http://* ]] && { logline "已拒绝明文 http 源: $src"; continue; }
+      [[ "$src" != https://* ]] && { logline "备用源非 https，跳过: $src"; continue; }
+      if curl -fL --retry 2 --max-time 300 -o "$localpkg" "$src"; then
+        if echo "$sha  $localpkg" | sha256sum -c - >/dev/null 2>&1; then
+          logline "升级包下载且校验通过: $src"
+          downloaded=1
+          break
+        fi
+        logline "升级包 sha256 不匹配，丢弃并切换源: $src"
+        rm -f "$localpkg"   # 防止残留包被后续步骤误用
+      else
+        logline "升级包下载失败，切换源: $src"
+        rm -f "$localpkg"
+      fi
+    done
+    if [ "$downloaded" -ne 1 ]; then
+      set_status "failed" 25 "主源与备用源均下载失败或校验未通过，已中止（源码未改动）"
       return 1
     fi
   else
@@ -381,7 +401,7 @@ while true; do
     if [ -n "$rid" ] && [ "$rid" != "$last" ]; then
       echo "$rid" > "$LAST_ID_FILE"
       case "$(jget "$req" action)" in
-        upgrade)       do_upgrade "$rid" "$(jget "$req" version)" "$(jget "$req" package)" "$(jget "$req" sha256)" ;;
+        upgrade)       do_upgrade "$rid" "$(jget "$req" version)" "$(jget "$req" package)" "$(jget "$req" sha256)" "$(jget "$req" package_fallback)" ;;
         rollback)      do_rollback_request "$rid" "$(jget "$req" backup_id)" ;;
         delete_backup) do_delete_backup "$rid" "$(jget "$req" backup_id)" ;;
         *) logline "忽略未知升级请求 action" ;;

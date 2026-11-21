@@ -917,7 +917,7 @@ func SSOHealthz(w http.ResponseWriter, r *http.Request) {
 	ssoJSON(w, 200, map[string]any{
 		"ok": true, "service": "ks-sslvpn-go", "version": "1.0.0",
 		"providers": ssoEnabledProviders(), "default_provider": ssoDefaultProvider(),
-		"feishu_enabled": cfg.Enabled, "mock": len(ssoEnabledProviders()) > 0 && ssoMockEnabled(ssoDefaultProvider()),
+		"feishu_enabled": cfg.Enabled, "mock": ssoMockAllowed() && len(ssoEnabledProviders()) > 0 && ssoMockEnabled(ssoDefaultProvider()),
 	})
 }
 
@@ -964,7 +964,7 @@ func SSOCfgGet(w http.ResponseWriter, r *http.Request) {
 	providers := []map[string]any{
 		{
 			"key": SSOFeishu, "name": "飞书",
-			"enabled": boolInt(ssoProviderEnabled(SSOFeishu)), "mock": boolInt(ssoMockEnabled(SSOFeishu)),
+			"enabled": boolInt(ssoProviderEnabled(SSOFeishu)), "mock": boolInt(ssoMockAllowed() && ssoMockEnabled(SSOFeishu)),
 			"app_id": cfg.AppID, "secret_set": cfg.AppSecret != "",
 			"tenant_key": cfg.TenantKey, "scope": cfg.Scope, "token_mode": cfg.TokenMode,
 			"auth_url": cfg.AuthURL, "token_url": cfg.TokenURL,
@@ -973,7 +973,7 @@ func SSOCfgGet(w http.ResponseWriter, r *http.Request) {
 		},
 		{
 			"key": SSODingTalk, "name": "钉钉",
-			"enabled": boolInt(ssoProviderEnabled(SSODingTalk)), "mock": boolInt(ssoMockEnabled(SSODingTalk)),
+			"enabled": boolInt(ssoProviderEnabled(SSODingTalk)), "mock": boolInt(ssoMockAllowed() && ssoMockEnabled(SSODingTalk)),
 			"app_id": db.GetSetting("dingtalk_client_id"), "secret_set": db.GetSetting("dingtalk_client_secret") != "",
 			"scope":        ssoSetting("dingtalk_scope", "openid"),
 			"auth_url":     ssoSetting("dingtalk_auth_url", "https://login.dingtalk.com/oauth2/auth"),
@@ -983,7 +983,7 @@ func SSOCfgGet(w http.ResponseWriter, r *http.Request) {
 		},
 		{
 			"key": SSOWeCom, "name": "企业微信",
-			"enabled": boolInt(ssoProviderEnabled(SSOWeCom)), "mock": boolInt(ssoMockEnabled(SSOWeCom)),
+			"enabled": boolInt(ssoProviderEnabled(SSOWeCom)), "mock": boolInt(ssoMockAllowed() && ssoMockEnabled(SSOWeCom)),
 			"app_id": db.GetSetting("wecom_corp_id"), "agent_id": db.GetSetting("wecom_agent_id"),
 			"secret_set":   db.GetSetting("wecom_corp_secret") != "",
 			"auth_url":     ssoSetting("wecom_auth_url", "https://login.work.weixin.qq.com/wwlogin/sso/login"),
@@ -1002,7 +1002,7 @@ func SSOCfgGet(w http.ResponseWriter, r *http.Request) {
 		"token_ttl":           cfg.TokenTTLSec,
 		"match_attr":          cfg.MatchAttr,
 		"verify_secret_set":   len(cfg.VerifySecret) >= 32,
-		"mock_all":            db.GetSetting("sso_mock_mode") == "1",
+		"mock_all":            ssoMockAllowed() && db.GetSetting("sso_mock_mode") == "1",
 		"enabled_count":       len(ssoEnabledProviders()),
 		"providers":           providers,
 	})
@@ -1120,8 +1120,19 @@ func SSOCfgSave(w http.ResponseWriter, r *http.Request) {
 			wecomCache.Unlock()
 		}
 	}
-	db.Syslog("admin", "更新扫码登录配置", "default="+ssoDefaultProvider()+" enabled="+fmt.Sprint(ssoEnabledProviders()), clientIP(r))
-	util.OKMsg(w, "扫码登录配置已保存，立即生效", map[string]any{"enabled": ssoEnabledProviders()})
+	mockActive := ssoMockAllowed() && (req.MockAll == 1 || func() bool {
+		for _, p := range req.Providers {
+			if p.Mock == 1 {
+				return true
+			}
+		}
+		return false
+	}())
+	db.Syslog("admin", "更新扫码登录配置", "default="+ssoDefaultProvider()+" enabled="+fmt.Sprint(ssoEnabledProviders())+" mock="+fmt.Sprint(mockActive), clientIP(r))
+	if mockActive {
+		db.Syslog("admin", "扫码登录联调模式已开启", "mock 身份可由回调参数伪造，仅限开发环境；生产环境应设 SSLVPN_ALLOW_SSO_MOCK=0", clientIP(r))
+	}
+	util.OKMsg(w, "扫码登录配置已保存，立即生效", map[string]any{"enabled": ssoEnabledProviders(), "mock": mockActive})
 }
 
 // SSOTest POST /api/v1/system/testFeishu　（body 可带 provider，默认飞书）
