@@ -284,6 +284,7 @@ func UpgradeVersion(w http.ResponseWriter, r *http.Request) {
 	st := statusKV()
 	util.OK(w, map[string]any{
 		"version":         version.Version,
+		"notes":           version.Notes,
 		"update_url":      updateSource(),
 		"agent_online":    agentOnline(),
 		"agent_heartbeat": st["heartbeat"],
@@ -302,6 +303,7 @@ func UpgradeCheck(w http.ResponseWriter, r *http.Request) {
 	compatible := m.MinVersion == "" || version.Compare(version.Version, m.MinVersion) >= 0
 	util.OK(w, map[string]any{
 		"current":          version.Version,
+		"current_notes":    version.Notes,
 		"latest":           m.Version,
 		"has_update":       newer,
 		"released_at":      m.ReleasedAt,

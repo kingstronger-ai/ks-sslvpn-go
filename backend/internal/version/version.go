@@ -11,8 +11,14 @@ import (
 //go:embed VERSION
 var raw string
 
+//go:embed NOTES
+var rawNotes string
+
 // Version 当前程序版本号
 var Version = strings.TrimSpace(raw)
+
+// Notes 当前版本主要内容（发版时随 NOTES 文件更新，随二进制分发，离线可读）
+var Notes = strings.TrimSpace(rawNotes)
 
 // Parse 解析 x.y.z（允许 v 前缀、不足三段与预发布后缀）；失败返回 false。
 func Parse(s string) ([3]int, bool) {

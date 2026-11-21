@@ -57,9 +57,15 @@ func TestUpgradeVersionAndCheck(t *testing.T) {
 	if v.Code != 1 || v.Data["version"] == "" || v.Data["agent_online"] != true {
 		t.Fatalf("版本信息异常：%+v", v)
 	}
+	if notes, _ := v.Data["notes"].(string); notes == "" {
+		t.Fatalf("/upgrade/version 应返回本版本主要内容 notes：%+v", v.Data)
+	}
 	c := callUpgrade(t, UpgradeCheck, "GET", "")
 	if c.Code != 1 || c.Data["has_update"] != true || c.Data["ready"] != true {
 		t.Fatalf("应检测到新版本且可升级：%+v", c)
+	}
+	if notes, _ := c.Data["current_notes"].(string); notes == "" {
+		t.Fatalf("/upgrade/check 应返回本版本主要内容 current_notes：%+v", c.Data)
 	}
 }
 

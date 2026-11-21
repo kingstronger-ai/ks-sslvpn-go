@@ -2392,6 +2392,9 @@ async function upgradeVersion() {
       <div><div class="muted">升级代理</div><div>${d.agent_online ? '<span class="badge ok">在线</span>' : '<span class="badge off">离线</span>'}</div></div>
       <div><div class="muted">更新源</div><div class="muted" style="font-size:12px">${esc(d.update_url || "未配置")}</div></div>
     </div>
+    ${d.notes ? `<div style="margin-top:14px;padding:10px 12px;background:var(--border, #eef1f4);border-radius:6px">
+      <div class="muted" style="font-size:12px;margin-bottom:4px">本版本主要内容</div>
+      <div style="line-height:1.8;font-size:13px;white-space:pre-wrap">${esc(d.notes)}</div></div>` : ""}
     ${d.agent_online ? "" : '<div class="err-box" style="margin-top:12px">⚠ 宿主机升级代理未在线：请在服务器执行 <code>bash deploy/install-upgrade-agent.sh</code>，并配置 <code>SSLVPN_UPDATE_URL</code> 后重建容器。</div>'}
     ${d.update_url ? "" : '<div class="err-box" style="margin-top:12px">⚠ 未配置更新源：在 docker-compose.yml 的 environment 增加 <code>SSLVPN_UPDATE_URL=file:///var/lib/sslvpn/upgrade/version.json</code>（或指向 http(s) 的 version.json）后重建容器。</div>'}`;
 }
@@ -2406,7 +2409,8 @@ async function upgradeCheck() {
     if (r.code !== 1) { box.innerHTML = errBox(r.msg); return; }
     const d = r.data;
     if (!d.has_update) {
-      box.innerHTML = `<div class="tip-banner">✅ 当前已是最新版本 <b>${esc(d.current)}</b>（更新源版本 ${esc(d.latest)}）。</div>`;
+      box.innerHTML = `<div class="tip-banner">✅ 当前已是最新版本 <b>${esc(d.current)}</b>（更新源版本 ${esc(d.latest)}）。</div>
+        ${(d.current_notes || d.notes) ? `<div class="muted" style="line-height:1.8;margin-top:10px">${esc(d.current_notes || d.notes)}</div>` : ""}`;
       return;
     }
     box.innerHTML = `<div class="tip-banner">发现新版本 <b style="font-size:16px;color:var(--primary)">${esc(d.latest)}</b>（当前 ${esc(d.current)}）<span class="muted"> · 发布 ${esc(d.released_at || "-")}</span></div>
