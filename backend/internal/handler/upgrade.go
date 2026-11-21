@@ -99,12 +99,28 @@ type updateManifest struct {
 
 // updateRedirectPolicy 返回更新源的重定向策略：禁止 https→http 降级、禁止跨主机跳转、
 // 限制重定向次数。防止 manifest 本体经 302 被引导到明文或其它主机（CWE-601/319）。
+// redirectHostAllowed 判断重定向目标主机是否可信：
+// 允许同源，或 Gitee / GitHub 官方 raw 内容 CDN（它们的 raw 接口会 302 到这些域名）。
+// 用 Hostname() 去掉端口，且要求子域前缀带点，避免 evilgiteeusercontent.com 之类伪装域名绕过。
+func redirectHostAllowed(target *url.URL, origin *url.URL) bool {
+	th := strings.ToLower(target.Hostname())
+	if origin != nil && strings.EqualFold(th, origin.Hostname()) {
+		return true
+	}
+	for _, cdn := range []string{"giteeusercontent.com", "githubusercontent.com"} {
+		if th == cdn || strings.HasSuffix(th, "."+cdn) {
+			return true
+		}
+	}
+	return false
+}
+
 func updateRedirectPolicy(origin *url.URL) func(*http.Request, []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
 		if req.URL.Scheme != "https" {
 			return errors.New("更新源重定向禁止降级到非 https")
 		}
-		if origin != nil && !strings.EqualFold(req.URL.Host, origin.Host) {
+		if !redirectHostAllowed(req.URL, origin) {
 			return errors.New("更新源重定向禁止跳转到其它主机")
 		}
 		if len(via) >= 3 {

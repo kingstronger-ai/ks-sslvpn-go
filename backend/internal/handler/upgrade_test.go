@@ -253,6 +253,18 @@ func TestUpdateRedirectPolicy(t *testing.T) {
 	if err := policy(mk("https", "gitee.com"), via); err != nil {
 		t.Errorf("同主机 https 跳转应放行: %v", err)
 	}
+	// Gitee / GitHub 官方 raw CDN 跳转应放行（gitee.com/raw/... 会 302 到 giteeusercontent.com）
+	for _, cdn := range []string{"raw.giteeusercontent.com", "raw.githubusercontent.com"} {
+		if err := policy(mk("https", cdn), via); err != nil {
+			t.Errorf("官方 CDN %s 跳转应放行: %v", cdn, err)
+		}
+	}
+	// 伪装域名（前缀相近但非官方子域）仍应拒绝
+	for _, fake := range []string{"evilgiteeusercontent.com", "giteeusercontent.com.evil.com", "raw.giteeusercontent.com.evil.com"} {
+		if err := policy(mk("https", fake), via); err == nil {
+			t.Errorf("伪装域名 %s 跳转应被拒绝", fake)
+		}
+	}
 	// 重定向次数过多
 	longVia := make([]*http.Request, 3)
 	if err := policy(mk("https", "gitee.com"), longVia); err == nil {
