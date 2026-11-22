@@ -4,6 +4,7 @@ package handler
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -92,23 +93,12 @@ func LoginCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var hash string
-	var status int
-	err := db.DB.QueryRow(`SELECT password, status FROM admin WHERE username=?`, req.Username).
-		Scan(&hash, &status)
+	var status, super, totpEnabled int
+	var adminID int64
+	err := db.DB.QueryRow(`SELECT id,password,status,COALESCE(super,0),COALESCE(totp_enabled,0) FROM admin WHERE username=?`, req.Username).
+		Scan(&adminID, &hash, &status, &super, &totpEnabled)
 	if err != nil || status != 1 || bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) != nil {
-		loginAttempts.Lock()
-		for _, k := range []string{ipKey, userKey} {
-			st := loginAttempts.m[k]
-			if st == nil {
-				st = &loginFailState{}
-				loginAttempts.m[k] = st
-			}
-			st.fails++
-			if st.fails >= loginMaxFails && st.lockedUntil.IsZero() {
-				st.lockedUntil = time.Now().Add(loginLockDuration)
-			}
-		}
-		loginAttempts.Unlock()
+		recordLoginFail(ipKey, userKey)
 		db.Syslog(req.Username, "登录失败", "用户名或密码错误", ip)
 		util.Fail(w, "用户名或密码错误")
 		return
@@ -119,23 +109,182 @@ func LoginCheck(w http.ResponseWriter, r *http.Request) {
 	delete(loginAttempts.m, userKey)
 	loginAttempts.Unlock()
 
-	token := middleware.MakeSession()
+	// B1-2：开启管理员 MFA 时，密码正确只发短期票据，不签发会话
+	if totpEnabled == 1 {
+		mfaTicket := middleware.MakeMFATicket(adminID, ip)
+		db.SyslogWithID(req.Username, "需要二次验证", "", ip, adminID)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 10, "msg": "需要二次验证", "mfa_token": mfaTicket,
+		})
+		return
+	}
+
+	// B1-1：正式会话带 jti 并落库，服务端可随时吊销；顺带清理过期会话
+	middleware.DeleteExpiredSessions()
+	token, jti := middleware.MakeSessionFull(req.Username)
+	middleware.SetSessionClient(jti, ip, r.UserAgent())
 	http.SetCookie(w, &http.Cookie{
 		Name: "sslvpn_session", Value: token, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		Secure: requestIsHTTPS(r),
 	})
-	db.Syslog(req.Username, "登录成功", "", ip)
+	db.SyslogWithID(req.Username, "登录成功", "", ip, adminID)
+	incrLoginCount()
+	util.OKMsg(w, "登录成功", map[string]string{"token": token, "username": req.Username, "super": superFlag(super)})
+}
+
+// recordLoginFail 对给定维度（IP / 用户名）累加失败次数，达阈值后锁定 10 分钟。
+func recordLoginFail(keys ...string) {
+	loginAttempts.Lock()
+	defer loginAttempts.Unlock()
+	for _, k := range keys {
+		st := loginAttempts.m[k]
+		if st == nil {
+			st = &loginFailState{}
+			loginAttempts.m[k] = st
+		}
+		st.fails++
+		if st.fails >= loginMaxFails && st.lockedUntil.IsZero() {
+			st.lockedUntil = time.Now().Add(loginLockDuration)
+		}
+	}
+}
+
+// incrLoginCount 登录成功计数
+func incrLoginCount() {
 	if n, err := strconv.Atoi(db.GetSetting("login_count")); err == nil {
 		db.SetSetting("login_count", strconv.Itoa(n+1))
 	} else {
 		db.SetSetting("login_count", "1")
 	}
-	util.OKMsg(w, "登录成功", map[string]string{"token": token})
+}
+
+// superFlag 管理员 super 标记序列化为 "1"/"0"（前端据此显隐管理员管理入口）
+func superFlag(super int) string {
+	if super == 1 {
+		return "1"
+	}
+	return "0"
+}
+
+// LoginMFA 管理员二次验证：/logincheck 密码通过后发的 mfa_token + TOTP（或恢复码）换正式会话。
+// 未开 MFA 的管理员不会走到这里；失败同样计入 loginFailState 防爆破。
+func LoginMFA(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		MFAToken string `json:"mfa_token"`
+		OTP      string `json:"otp"`
+	}
+	if err := util.ReadJSON(r, &req); err != nil || req.MFAToken == "" || strings.TrimSpace(req.OTP) == "" {
+		util.Fail(w, "参数错误")
+		return
+	}
+	ip := clientIP(r)
+	ipKey := "ip:" + ip
+	loginAttempts.Lock()
+	ipLocked := loginLocked(ipKey)
+	loginAttempts.Unlock()
+	if ipLocked {
+		util.Fail(w, "失败次数过多，请 10 分钟后再试")
+		return
+	}
+
+	adminID, ok := middleware.VerifyMFATicket(req.MFAToken, ip)
+	if !ok || adminID <= 0 {
+		recordLoginFail(ipKey)
+		db.Syslog("unknown", "MFA 票据无效", "签名/有效期/IP 绑定校验失败", ip)
+		util.Fail(w, "二次验证票据无效或已过期，请重新登录")
+		return
+	}
+
+	var username, secret, recovery string
+	var status, super, totpEnabled int
+	err := db.DB.QueryRow(`SELECT username,status,COALESCE(super,0),COALESCE(totp_enabled,0),
+		COALESCE(totp_secret,''),COALESCE(totp_recovery,'') FROM admin WHERE id=?`, adminID).
+		Scan(&username, &status, &super, &totpEnabled, &secret, &recovery)
+	if err != nil || status != 1 || totpEnabled != 1 {
+		recordLoginFail(ipKey)
+		util.Fail(w, "二次验证票据已失效，请重新登录")
+		return
+	}
+	userKey := "u:" + strings.ToLower(strings.TrimSpace(username))
+	loginAttempts.Lock()
+	userLocked := loginLocked(userKey)
+	loginAttempts.Unlock()
+	if userLocked {
+		util.Fail(w, "失败次数过多，请 10 分钟后再试")
+		return
+	}
+
+	otp := strings.TrimSpace(req.OTP)
+	verified := (secret != "" && util.VerifyTOTP(secret, otp)) || consumeRecoveryCode(adminID, recovery, otp)
+	if !verified {
+		recordLoginFail(ipKey, userKey)
+		db.SyslogWithID(username, "MFA 验证失败", "", ip, adminID)
+		util.Fail(w, "动态码或恢复码错误；连续错误将被临时锁定")
+		return
+	}
+
+	loginAttempts.Lock()
+	delete(loginAttempts.m, ipKey)
+	delete(loginAttempts.m, userKey)
+	loginAttempts.Unlock()
+
+	middleware.DeleteExpiredSessions()
+	token, jti := middleware.MakeSessionFull(username)
+	middleware.SetSessionClient(jti, ip, r.UserAgent())
+	http.SetCookie(w, &http.Cookie{
+		Name: "sslvpn_session", Value: token, Path: "/",
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: requestIsHTTPS(r),
+	})
+	db.SyslogWithID(username, "登录成功（MFA）", "", ip, adminID)
+	incrLoginCount()
+	util.OKMsg(w, "登录成功", map[string]string{"token": token, "username": username, "super": superFlag(super)})
+}
+
+// consumeRecoveryCode 校验并消费单个 MFA 恢复码（单次使用），成功后从库中移除该码
+func consumeRecoveryCode(adminID int64, recoveryJSON, code string) bool {
+	if code == "" || recoveryJSON == "" {
+		return false
+	}
+	var hashes []string
+	if err := json.Unmarshal([]byte(recoveryJSON), &hashes); err != nil {
+		return false
+	}
+	digest := sha256s(code)
+	kept := make([]string, 0, len(hashes))
+	used := false
+	for _, h := range hashes {
+		if !used && h == digest {
+			used = true
+			continue
+		}
+		kept = append(kept, h)
+	}
+	if !used {
+		return false
+	}
+	b, _ := json.Marshal(kept)
+	_, _ = db.DB.Exec(`UPDATE admin SET totp_recovery=? WHERE id=?`, string(b), adminID)
+	return true
 }
 
 func Logout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: "sslvpn_session", Value: "", Path: "/", MaxAge: -1})
+	// B1-1：登出即吊销服务端会话，避免仅删 cookie 导致的会话继续有效
+	if jti := middleware.SessionJTI(middleware.TokenFromRequest(r)); jti != "" {
+		middleware.RevokeJTI(jti)
+	}
+	syslogFromRequest(r, "退出登录", "")
+	http.SetCookie(w, &http.Cookie{Name: "sslvpn_session", Value: "", Path: "/", MaxAge: -1,
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: requestIsHTTPS(r)})
 	util.OKMsg(w, "已退出", nil)
+}
+
+// requestIsHTTPS 判断当前请求是否经 HTTPS 到达：TLS 直连，或可信反代传入
+// X-Forwarded-Proto: https。仅 https 会话才给 Cookie 加 Secure 属性，
+// 避免纯 http 内网部署（如 SSLVPN_API_BIND 明文口）登录态失效。
+func requestIsHTTPS(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 
 // trustProxyHeaders 仅在显式开启 SSLVPN_TRUST_PROXY=1 时才采信 X-Real-IP / X-Forwarded-For。
@@ -396,6 +545,11 @@ func CheckCode(w http.ResponseWriter, r *http.Request) {
 	if _, err := db.DB.Exec(`UPDATE admin SET password=?, updated_at=datetime('now','localtime') WHERE email=?`, hash, req.Email); err != nil {
 		util.Fail(w, "重置失败")
 		return
+	}
+	// 邮箱找回改密同样吊销该管理员全部会话
+	var resetID int64
+	if db.DB.QueryRow(`SELECT id FROM admin WHERE email=?`, req.Email).Scan(&resetID) == nil {
+		middleware.RevokeAdmin(resetID)
 	}
 	util.OKMsg(w, "密码已重置，请使用新密码登录", nil)
 }

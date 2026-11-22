@@ -2,7 +2,9 @@
 package handler
 
 import (
+	"bytes"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +15,74 @@ import (
 	"sslvpn/internal/util"
 	"sslvpn/internal/vpn"
 )
+
+// ---------- P1-2：写入 server.conf 前的字段白名单校验 ----------
+// subnet/mask/push_routes/proto 会被原样渲染进 server.conf（模板无转义），
+// 必须严格白名单，否则管理员会话被劫持/CSRF 后可注入 push/script-security/up/
+// 等任意 OpenVPN 指令（script-security 2 + hook 已开启，等于任意命令执行面）。
+
+// validIPv4 严格的点分十进制 IPv4（net.ParseIP 已拒绝前导零与缩写）
+func validIPv4(s string) bool {
+	ip := net.ParseIP(s)
+	return ip != nil && ip.To4() != nil
+}
+
+// validNetMask 合法的连续掩码（255.0.255.0 等非连续形式一律拒绝）
+func validNetMask(s string) bool {
+	ip := net.ParseIP(s)
+	if ip == nil || ip.To4() == nil {
+		return false
+	}
+	m := net.IPMask(ip.To4())
+	ones, bits := m.Size()
+	if bits != 32 || ones == 0 {
+		return false
+	}
+	return bytes.Equal(m, net.CIDRMask(ones, 32))
+}
+
+// validProto 仅允许 OpenVPN 协议取值（udp/tcp 及其 4/6 变体），杜绝夹带指令
+func validProto(p string) bool {
+	switch p {
+	case "udp", "udp4", "udp6", "tcp", "tcp4", "tcp6":
+		return true
+	}
+	return false
+}
+
+// validPushRouteLine push_routes 每行只允许 "network mask" 形式：
+// 严格 IP+掩码、单行两个 token，天然拒绝引号/分号/换行注入的 push、
+// script-security、up、client-connect 等关键字。
+func validPushRouteLine(line string) bool {
+	fields := strings.Fields(line)
+	if len(fields) != 2 {
+		return false
+	}
+	return validIPv4(fields[0]) && validNetMask(fields[1])
+}
+
+// validateServiceConf 校验会进入 server.conf 的字段；失败返回明确错误（HTTP 400）
+func validateServiceConf(s *vpn.Service) error {
+	if !validProto(s.Proto) {
+		return fmt.Errorf("协议不合法（仅支持 udp/tcp 及其 4/6 变体）")
+	}
+	if !validIPv4(s.Subnet) {
+		return fmt.Errorf("虚拟网段不合法（需为点分十进制 IPv4，如 10.8.0.0）")
+	}
+	if !validNetMask(s.Mask) {
+		return fmt.Errorf("子网掩码不合法（需为连续掩码，如 255.255.255.0）")
+	}
+	for _, line := range strings.Split(s.PushRoutes, "\n") {
+		line = strings.TrimSpace(strings.Trim(line, "\r"))
+		if line == "" {
+			continue
+		}
+		if !validPushRouteLine(line) {
+			return fmt.Errorf("推送路由不合法：每行只允许「网段 掩码」形式（如 192.168.1.0 255.255.255.0），且必须是合法 IPv4 与连续掩码")
+		}
+	}
+	return nil
+}
 
 func serviceByName(name string) (*vpn.Service, error) {
 	var s vpn.Service
@@ -37,6 +107,11 @@ func ServiceAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.Subnet == "" {
 		s.Subnet, s.Mask = "10.8.0.0", "255.255.255.0"
+	}
+	// P1-2：入 conf 字段白名单校验，失败返回 400
+	if err := validateServiceConf(&s); err != nil {
+		util.FailStatus(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	var exists int
 	_ = db.DB.QueryRow(`SELECT COUNT(*) FROM service WHERE name=? OR port=?`, s.Name, s.Port).Scan(&exists)
@@ -65,7 +140,7 @@ func ServiceAdd(w http.ResponseWriter, r *http.Request) {
 	// 放行端口 + SNAT
 	_ = fw.OpenPort(s.Port, s.Proto)
 	_ = fw.EnableSNAT(s.Subnet+"/"+maskToCIDR(s.Mask), fw.OutInterface())
-	db.Syslog("admin", "创建VPN服务实例", s.Name, clientIP(r))
+	syslogFromRequest(r, "创建VPN服务实例", s.Name)
 	util.OK(w, map[string]int64{"id": id})
 }
 
@@ -121,7 +196,7 @@ func ServiceStart(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = db.DB.Exec(`UPDATE service SET status=1 WHERE id=?`, s.ID)
 	refreshSNAT() // 确保该网段的 NAT 伪装存在（容器重建后规则会丢失）
-	db.Syslog("admin", "启动VPN服务", s.Name, clientIP(r))
+	syslogFromRequest(r, "启动VPN服务", s.Name)
 	util.OKMsg(w, "已启动", nil)
 }
 
@@ -141,7 +216,7 @@ func ServiceStop(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = vpn.StopInstance(s.Name)
 	_, _ = db.DB.Exec(`UPDATE service SET status=0 WHERE id=?`, s.ID)
-	db.Syslog("admin", "停止VPN服务", s.Name, clientIP(r))
+	syslogFromRequest(r, "停止VPN服务", s.Name)
 	util.OKMsg(w, "已停止", nil)
 }
 
@@ -240,6 +315,11 @@ func ServiceAddRouter(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "参数错误（route 格式：网段 掩码）")
 		return
 	}
+	// P1-2：该行最终会以 push "route <line>" 写入 server.conf，同样做白名单校验
+	if !validPushRouteLine(req.Route) {
+		util.FailStatus(w, http.StatusBadRequest, "路由不合法：只允许「网段 掩码」形式（合法 IPv4 与连续掩码）")
+		return
+	}
 	s, err := resolveService("", req.ID)
 	if err != nil {
 		util.Fail(w, "服务不存在")
@@ -320,7 +400,7 @@ func ServiceRemove(w http.ResponseWriter, r *http.Request) {
 	_, _ = db.DB.Exec(`DELETE FROM group_service WHERE service_id=?`, s.ID)
 	_, _ = db.DB.Exec(`DELETE FROM ccd WHERE service_id=?`, s.ID)
 	_ = fw.ClosePort(s.Port, s.Proto)
-	db.Syslog("admin", "删除VPN服务实例", s.Name, clientIP(r))
+	syslogFromRequest(r, "删除VPN服务实例", s.Name)
 	util.OKMsg(w, "实例已删除", nil)
 }
 
@@ -362,6 +442,11 @@ func ServiceEdit(w http.ResponseWriter, r *http.Request) {
 	if s.Mask == "" {
 		s.Mask = old.Mask
 	}
+	// P1-2：合并后的字段（含未提交时的旧值回填）在写库/渲染 conf 前做白名单校验
+	if err := validateServiceConf(&s); err != nil {
+		util.FailStatus(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if _, err := db.DB.Exec(`UPDATE service SET port=?,proto=?,subnet=?,mask=?,push_routes=?,redirect_gw=?,
 		client_to_client=?,duplicate_cn=?,max_clients=? WHERE id=?`,
 		s.Port, s.Proto, s.Subnet, s.Mask, s.PushRoutes, s.RedirectGW, s.ClientToClient, s.DuplicateCN,
@@ -383,7 +468,7 @@ func ServiceEdit(w http.ResponseWriter, r *http.Request) {
 	if portChanged {
 		_ = fw.ClosePort(old.Port, ns.Proto)
 		_ = fw.OpenPort(ns.Port, ns.Proto)
-		db.Syslog("admin", "修改实例端口", old.Name+": "+fmt.Sprint(old.Port)+" -> "+fmt.Sprint(ns.Port)+"（在线用户需重新下发客户端配置）", clientIP(r))
+		syslogFromRequest(r, "修改实例端口", old.Name+": "+fmt.Sprint(old.Port)+" -> "+fmt.Sprint(ns.Port)+"（在线用户需重新下发客户端配置）")
 		util.OKMsg(w, "已更新并重载实例；端口已改为 "+fmt.Sprint(ns.Port)+"，请重新下发客户端配置", nil)
 		return
 	}

@@ -56,7 +56,7 @@ func LoginAliasSave(w http.ResponseWriter, r *http.Request) {
 	}
 	db.SetSetting(vpn.SetAliasMail, flag(req.Mail))
 	db.SetSetting(vpn.SetAliasUPN, flag(req.UPN))
-	db.Syslog("admin", "登录方式设置",
-		"邮箱别名="+flag(req.Mail)+"，UPN/DN别名="+flag(req.UPN), clientIP(r))
+	syslogFromRequest(r, "登录方式设置",
+		"邮箱别名="+flag(req.Mail)+"，UPN/DN别名="+flag(req.UPN))
 	util.OKMsg(w, "登录方式已保存", nil)
 }

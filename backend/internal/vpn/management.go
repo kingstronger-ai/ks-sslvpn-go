@@ -134,6 +134,9 @@ func kickOnInstance(svc string, names []string) (kicked int, failed, notOnline [
 	if _, e := os.Stat(sock); e != nil {
 		return 0, failed, notOnline, fmt.Errorf("实例未启用管理接口，请重启该实例后重试")
 	}
+	// P2-4：mgmt.sock 可下发 kill 指令，OpenVPN 以默认 umask 创建时可能为 0755，
+	// 这里首次访问前做一次 best-effort 收紧（仅容器内 root 进程间通信，应为 0600）。
+	_ = os.Chmod(sock, 0o600)
 	conn, err := net.DialTimeout("unix", sock, 3*time.Second)
 	if err != nil {
 		return 0, failed, notOnline, fmt.Errorf("连接管理接口失败: %w", err)

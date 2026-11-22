@@ -234,7 +234,7 @@ func DomainRouteAdd(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		MarkDomainRouteDirty([]int64{req.ServiceID})
-		db.Syslog("admin", "添加域名分流(实例级)", domain+" → "+strings.Join(ips, ","), clientIP(r))
+		syslogFromRequest(r, "添加域名分流(实例级)", domain+" → "+strings.Join(ips, ","))
 		util.OKMsg(w, "已添加（实例级，需「应用变更」重启实例后生效）："+msg, map[string]any{"ips": ips, "added": 1})
 		return
 	}
@@ -267,7 +267,7 @@ func DomainRouteAdd(w http.ResponseWriter, r *http.Request) {
 		added++
 	}
 	written, _ := vpn.SyncDomainCcd(db.DB, toScopes(users, req.ServiceID))
-	db.Syslog("admin", "添加域名分流", fmt.Sprintf("%s → %s 用户=%s", domain, strings.Join(ips, ","), strings.Join(users, ",")), clientIP(r))
+	syslogFromRequest(r, "添加域名分流", fmt.Sprintf("%s → %s 用户=%s", domain, strings.Join(ips, ","), strings.Join(users, ",")))
 	util.OKMsg(w, fmt.Sprintf("已保存 %d 个用户（跳过 %d），重写 %d 个 CCD 文件；%s。用户重新连接 VPN 后生效",
 		added, skipped, written, msg),
 		map[string]any{"ips": ips, "added": added, "skipped": skipped, "ccd_written": written})
@@ -388,7 +388,7 @@ func DomainRouteAddMulti(w http.ResponseWriter, r *http.Request) {
 	if len(failDomains) > 0 {
 		suffix = "；⚠️ 以下域名暂未解析到 IPv4（后台会自动重试）：" + strings.Join(failDomains, "、")
 	}
-	db.Syslog("admin", "批量添加域名分流", fmt.Sprintf("域名=%d 用户=%d 新增=%d", len(domains), len(users), added), clientIP(r))
+	syslogFromRequest(r, "批量添加域名分流", fmt.Sprintf("域名=%d 用户=%d 新增=%d", len(domains), len(users), added))
 	util.OKMsg(w, fmt.Sprintf("已添加 %d 条规则（跳过重复/失败 %d），重写 %d 个 CCD 文件；用户重新连接 VPN 后生效%s",
 		added, skipped, written, suffix),
 		map[string]any{"added": added, "skipped": skipped, "ccd_written": written,
@@ -456,7 +456,7 @@ func DomainRouteUpdate(w http.ResponseWriter, r *http.Request) {
 		MarkDomainRouteDirty([]int64{svcID})
 		msg = "已保存（实例级规则：需点「应用变更」重启实例才生效）"
 	}
-	db.Syslog("admin", "修改域名分流", fmt.Sprintf("#%d %s enabled=%d user=%s", req.ID, domain, enabled, username), clientIP(r))
+	syslogFromRequest(r, "修改域名分流", fmt.Sprintf("#%d %s enabled=%d user=%s", req.ID, domain, enabled, username))
 	util.OKMsg(w, msg, map[string]any{"ccd_written": written})
 }
 
@@ -497,7 +497,7 @@ func DomainRouteDelete(w http.ResponseWriter, r *http.Request) {
 		} else {
 			scopes = append(scopes, vpn.DomainRouteScope{ServiceID: svcID, Username: username})
 		}
-		db.Syslog("admin", "删除域名分流", domain+" user="+username, clientIP(r))
+		syslogFromRequest(r, "删除域名分流", domain+" user="+username)
 	}
 	written, _ := vpn.SyncDomainCcd(db.DB, scopes)
 	if len(dirtyInstances) > 0 {
@@ -608,7 +608,7 @@ func DomainRouteApply(w http.ResponseWriter, r *http.Request) {
 		done = append(done, s.Name)
 	}
 	clearDomainRouteDirty()
-	db.Syslog("admin", "应用域名分流", strings.Join(done, ",")+" 已重载", clientIP(r))
+	syslogFromRequest(r, "应用域名分流", strings.Join(done, ",")+" 已重载")
 	if len(failed) > 0 {
 		util.Fail(w, "以下实例重载失败："+strings.Join(failed, "；"))
 		return

@@ -1,9 +1,9 @@
 {
-  "version": "1.3.3",
-  "released_at": "2026-11-21",
-  "notes": "KSVPN v1.3.3：修复在线更新「获取更新源失败：更新源重定向禁止跳转到其它主机」——Gitee raw 会 302 到官方内容 CDN，此前被安全策略误拦，现已放行 Gitee/GitHub 官方 CDN 域名，仍强制 https、拒绝任意第三方主机与降级跳转。",
-  "package": "https://gitee.com/KingStrongerGee/ks-sslvpn-go/releases/download/v1.3.3/ks-sslvpn-go-v1.3.3.tar.gz",
-  "package_fallback": "https://github.com/kingstronger-ai/ks-sslvpn-go/releases/download/v1.3.3/ks-sslvpn-go-v1.3.3.tar.gz",
-  "sha256": "3365ad7219098e92c93ff7c16d97263efb7e1342fa989a358d5106810e5e8838",
+  "version": "1.3.4",
+  "released_at": "2026-11-22",
+  "notes": "KSVPN v1.3.4：管理员双因子登录（TOTP）、会话绑定真实身份可吊销、操作审计归因到人；新增 sslvpn doctor 预检、/health 健康页、/metrics 与四类告警；修复管理员越权、OpenVPN 配置注入等安全问题；档位口径修正，Mac 客户端沿用 v0.5.3。",
+  "package": "https://gitee.com/KingStrongerGee/ks-sslvpn-go/releases/download/v1.3.4/ks-sslvpn-go-v1.3.4.tar.gz",
+  "package_fallback": "https://github.com/kingstronger-ai/ks-sslvpn-go/releases/download/v1.3.4/ks-sslvpn-go-v1.3.4.tar.gz",
+  "sha256": "45bf9ab6bf520a9848476fdb1898e219c09e96765c7a5864c08525b150063954",
   "min_version": "1.2.0"
 }

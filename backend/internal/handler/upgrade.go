@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"sslvpn/internal/db"
 	"sslvpn/internal/util"
 	"sslvpn/internal/version"
 )
@@ -383,7 +382,7 @@ func UpgradeApply(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "写入升级请求失败："+err.Error())
 		return
 	}
-	db.Syslog("admin", "发起在线升级", version.Version+" -> "+m.Version, clientIP(r))
+	syslogFromRequest(r, "发起在线升级", version.Version+" -> "+m.Version)
 	util.OKMsg(w, "升级请求已提交，代理将先自动备份再执行", map[string]any{
 		"request_id": id, "version": m.Version,
 	})
@@ -461,7 +460,7 @@ func UpgradeBackupDelete(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "写入删除请求失败："+err.Error())
 		return
 	}
-	db.Syslog("admin", "删除升级备份", id, clientIP(r))
+	syslogFromRequest(r, "删除升级备份", id)
 	util.OKMsg(w, "删除请求已提交，代理将移除该备份目录", map[string]any{"request_id": rid, "backup_id": id})
 }
 
@@ -521,6 +520,6 @@ func UpgradeRollback(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "写入回滚请求失败："+err.Error())
 		return
 	}
-	db.Syslog("admin", "发起版本回滚", id, clientIP(r))
+	syslogFromRequest(r, "发起版本回滚", id)
 	util.OKMsg(w, "回滚请求已提交", map[string]any{"request_id": rid, "backup_id": id})
 }

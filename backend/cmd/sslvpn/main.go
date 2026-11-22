@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -33,9 +34,11 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"sslvpn/internal/acme"
+	"sslvpn/internal/alert"
 	"sslvpn/internal/db"
 	"sslvpn/internal/fw"
 	"sslvpn/internal/handler"
+	"sslvpn/internal/healthcheck"
 	"sslvpn/internal/license"
 	"sslvpn/internal/middleware"
 	"sslvpn/internal/util"
@@ -276,6 +279,12 @@ func main() {
 		return
 	}
 
+	// doctor：首次成功工程预检（TUN/NET_ADMIN/ip_forward/端口/时间/证书/SQLite）
+	// 本机 Windows 开发时对 Linux 专有检查 graceful skip，不会 panic。
+	if len(os.Args) >= 2 && os.Args[1] == "doctor" {
+		os.Exit(runDoctor(os.Args[2:]))
+	}
+
 	if len(os.Args) >= 2 && os.Args[1] == "init" {
 		if err := runInit(); err != nil {
 			log.Fatal("init: ", err)
@@ -398,6 +407,9 @@ func main() {
 	acme.Notify = handler.SendSystemMail
 	acme.StartLoop()
 
+	// A3 告警巡检：60s ticker，立即跑一次（配置默认关闭，开启后生效）
+	go alert.StartLoop()
+
 	mux := http.NewServeMux()
 
 	// ---- API 路由 ----
@@ -436,7 +448,7 @@ func main() {
 	//   ETag(内容哈希) + Cache-Control: no-cache —— 升级后浏览器必拿新资源，未变更时命中 304。
 	mux.Handle("/", staticFileHandler(dist))
 
-	root := middleware.CORS(mux)
+	root := middleware.SecurityHeaders(middleware.SameOrigin(middleware.CORS(mux)))
 
 	apiPort := os.Getenv("SSLVPN_API_PORT")
 	if apiPort == "" {
@@ -508,8 +520,11 @@ func apiEntry(base string, rt handler.Route, canonical bool) http.HandlerFunc {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		if r.Method != rt.Method && !(rt.Method == "GET" && r.Method == "HEAD") {
-			util.Fail(w, "请求方法不允许")
+		// rt.Method="*" 表示同一路径多方法由 handler 内部分发（如 /alert/config 的 GET/POST）
+		if rt.Method != "*" && r.Method != rt.Method && !(rt.Method == "GET" && r.Method == "HEAD") {
+			// 破坏性接口已统一改为 POST；同路径 GET 返回 405（允许缓存/浏览器缓存按 Allow 处理）
+			w.Header().Set("Allow", rt.Method)
+			util.FailStatus(w, http.StatusMethodNotAllowed, "请求方法不允许（该接口仅支持 "+rt.Method+"）")
 			return
 		}
 		if canonical {
@@ -538,6 +553,23 @@ func licenseAllow(path string) bool {
 		return true
 	}
 	return false
+}
+
+// runDoctor 执行预检并返回进程退出码：存在 FAIL 时 1，仅 WARN/SKIP 时 0。
+func runDoctor(args []string) int {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "输出结构化 JSON（供前端/脚本消费）")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	// 预检尽量在库未初始化时也给出完整报告；Open 失败时相关检查项会降级为 WARN/FAIL。
+	_ = db.Open(dataDir())
+	checks := healthcheck.RunAll(context.Background(), healthcheck.Options{DataDir: dataDir()})
+	fmt.Println(healthcheck.RenderReport(checks, *asJSON))
+	if healthcheck.HasFail(checks) {
+		return 1
+	}
+	return 0
 }
 
 // runInit 幂等初始化：建库、默认管理员、PKI、目录
@@ -671,6 +703,16 @@ func registerDNSProvider() {
 // 避免升级后新旧 app.js/index.html 混用导致白屏。
 func staticFileHandler(dist fs.FS) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// /health 与 /metrics 是无需鉴权的裸路径探针：关闭旧别名（SSLVPN_API_LEGACY_ALIAS=0）
+		// 时 registerAPIRoutes 不会挂裸路径，这里兜底保证探针与 Prometheus 始终可拉取。
+		if r.URL.Path == "/health" {
+			handler.Health(w, r)
+			return
+		}
+		if r.URL.Path == "/metrics" {
+			handler.Metrics(w, r)
+			return
+		}
 		// 命中已知接口但前缀不对（如关闭了旧别名后仍访问 /logincheck）时，返回 JSON 而非首页
 		if strings.HasPrefix(r.URL.Path, "/api/") || handler.Routes[handler.BasePath(r.URL.Path)].H != nil {
 			util.Fail(w, "接口不存在（请使用 "+handler.APIPrefix+" 前缀）")
@@ -791,5 +833,11 @@ exit 0
 	_ = os.MkdirAll(filepath.Join(dataDir(), "logs"), 0o755)
 	_ = os.MkdirAll(filepath.Join(dataDir(), "backup"), 0o755)
 	_ = os.MkdirAll(filepath.Join(dataDir(), "ssl"), 0o700)
+	// online_users 记录用户名+隧道 IP，属敏感状态文件：确保存在且仅属主可读（P2-4）
+	ouPath := filepath.Join(dataDir(), "auth", "online_users")
+	if f, err := os.OpenFile(ouPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+		_ = f.Close()
+	}
+	_ = os.Chmod(ouPath, 0o600)
 	return nil
 }

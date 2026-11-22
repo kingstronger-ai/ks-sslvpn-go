@@ -164,8 +164,60 @@ restore_volumes() {
 }
 
 # ---------- 回滚：保留失败现场 + 恢复旧源码/卷/镜像 ----------
+
+# 备份/失败现场保留上限：备份最近 5 份、失败现场最近 5 个，超出清理最旧（F-10）
+MAX_KEEP=5
+
+# valid_backup_id：与 do_delete_backup 同一白名单（F-10）。
+# 仅允许 bk- 前缀 + [A-Za-z0-9._-]，禁止 ".." 与 "/"，杜绝经 rollback 路径穿越/DoS。
+valid_backup_id() {
+  case "$1" in
+    bk-[A-Za-z0-9._-]*) : ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *..*|*/*) return 1 ;;
+  esac
+  return 0
+}
+
+# prune_old_backups：backups.txt 追加式（末行最新），超出 MAX_KEEP 清理最旧
+prune_old_backups() {
+  local total extra old d
+  total="$(grep -c . "$WORK/backups.txt" 2>/dev/null || echo 0)"
+  [ "$total" -gt "$MAX_KEEP" ] || return 0
+  extra=$((total - MAX_KEEP))
+  head -n "$extra" "$WORK/backups.txt" | cut -d'|' -f1 | while IFS= read -r old; do
+    [ -n "$old" ] || continue
+    d="$WORK/backups/$old"
+    if [ -d "$d" ]; then rm -rf -- "$d"; fi
+    logline "清理最旧备份 $old（最多保留 $MAX_KEEP 份）"
+  done
+  tail -n "$MAX_KEEP" "$WORK/backups.txt" > "$WORK/backups.txt.tmp" \
+    && mv -f "$WORK/backups.txt.tmp" "$WORK/backups.txt"
+  put "$WORK/backups.txt" backups.txt
+}
+
+# prune_failed_dirs：failed-* 现场目录按 mtime 保留最近 MAX_KEEP 个
+prune_failed_dirs() {
+  local n=0 d
+  for d in $(ls -1dt "$APP_DIR".failed-* 2>/dev/null); do
+    n=$((n + 1))
+    if [ "$n" -gt "$MAX_KEEP" ]; then
+      rm -rf -- "$d"
+      logline "清理最旧失败现场 $d（最多保留 $MAX_KEEP 个）"
+    fi
+  done
+}
+
 do_rollback() {
   local bid="$1" bk="$WORK/backups/$bid" oldver
+  # F-10：backup_id 白名单校验（此前 rollback 直接透传，可被 request.json 注入 ../../ 触发
+  # 「先停服后失败」的稳定 DoS）
+  if ! valid_backup_id "$bid"; then
+    logline "备份 ID 不合法，已拒绝回滚: $bid"
+    return 1
+  fi
   [ -d "$bk" ] || { logline "备份 $bid 不存在，无法回滚"; return 1; }
   oldver="$(tr -d '\r\n' < "$bk/VERSION" 2>/dev/null || echo unknown)"
   set_status "rolling_back" 70 "正在回滚到版本 $oldver（含数据卷恢复）"
@@ -191,6 +243,8 @@ do_rollback() {
   if [ $? -ne 0 ]; then logline "回滚时启动容器失败，详见 $WORK/rollback.log"; return 1; fi
   if ! health_wait; then logline "回滚后健康检查未通过，详见 $WORK/rollback.log"; return 1; fi
   logline "回滚完成，当前版本 $oldver"
+  prune_old_backups
+  prune_failed_dirs
   echo "$oldver"
   return 0
 }
@@ -206,6 +260,20 @@ rollback_and_fail() {
 }
 
 # ---------- 升级 ----------
+# F-11：升级包主机允许列表（与后端 manifest 白名单保持一致）。
+# 仅接受官方发布域名；重定向链由 curl --proto-redir '=https' 强制全程 https。
+pkg_host_allowed() {
+  case "$1" in
+    gitee.com|github.com|objects.githubusercontent.com|raw.githubusercontent.com) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# url_host 提取 https URL 的主机名
+url_host() {
+  printf '%s' "$1" | sed -E 's#^https://([^/?#]+).*#\1#'
+}
+
 do_upgrade() {
   local rid="$1" ver="$2" pkg="$3" sha="$4" fallback_pkg="${5:-}"
   local bid="bk-$(date +%Y%m%d-%H%M%S)" localpkg top newver
@@ -240,7 +308,17 @@ do_upgrade() {
       [ -z "$src" ] && continue
       [[ "$src" == http://* ]] && { logline "已拒绝明文 http 源: $src"; continue; }
       [[ "$src" != https://* ]] && { logline "备用源非 https，跳过: $src"; continue; }
-      if curl -fL --retry 2 --max-time 300 -o "$localpkg" "$src"; then
+      # F-11：包主机白名单（manifest 无签名前提下收窄“任意 https 源”的攻击面）
+      src_host="$(url_host "$src")"
+      if ! pkg_host_allowed "$src_host"; then
+        logline "已拒绝非白名单包主机: $src_host（仅允许 gitee.com/github.com 及其发布域）"
+        continue
+      fi
+      # F-11：--proto/--proto-redir 全程 https（禁降级、禁内网 http 重定向），
+      # --max-filesize 2GB 防恶意源撑爆磁盘，--max-redirs 限制重定向链。
+      if curl -fL --proto '=https' --proto-redir '=https' --max-redirs 5 \
+           --max-filesize 2147483648 --connect-timeout 10 --retry 2 --max-time 1800 \
+           -o "$localpkg" "$src"; then
         if echo "$sha  $localpkg" | sha256sum -c - >/dev/null 2>&1; then
           logline "升级包下载且校验通过: $src"
           downloaded=1
@@ -346,6 +424,8 @@ do_upgrade() {
 
   set_status "done" 100 "升级完成，当前版本 $newver；升级前备份 $bid 可随时回滚" "$newver"
   logline "升级完成：$newver（备份 $bid）"
+  prune_old_backups
+  prune_failed_dirs
 }
 
 do_rollback_request() {

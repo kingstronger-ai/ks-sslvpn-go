@@ -19,11 +19,53 @@ import (
 	"sslvpn/internal/fw"
 	"sslvpn/internal/license"
 	"sslvpn/internal/mail"
+	"sslvpn/internal/middleware"
 	"sslvpn/internal/util"
 	"sslvpn/internal/vpn"
 )
 
 // ---------- 管理员 ----------
+
+// adminIdentity 当前登录管理员的身份（来自会话 token 中的 subject）
+type adminIdentity struct {
+	ID       int64
+	Username string
+	Super    bool
+}
+
+// currentAdmin 从请求会话解析当前管理员；旧格式 token（升级前签发）无身份信息，
+// 返回 false，要求重新登录后再执行管理操作。
+func currentAdmin(r *http.Request) (adminIdentity, bool) {
+	sub := middleware.SessionUser(middleware.TokenFromRequest(r))
+	if sub == "" {
+		return adminIdentity{}, false
+	}
+	var id int64
+	var status, super int
+	if err := db.DB.QueryRow(`SELECT id, status, COALESCE(super,0) FROM admin WHERE username=?`, sub).
+		Scan(&id, &status, &super); err != nil || status != 1 {
+		return adminIdentity{}, false
+	}
+	return adminIdentity{ID: id, Username: sub, Super: super == 1}, true
+}
+
+// adminByID 按目标 ID 取管理员；不存在返回 false
+func adminByID(id int64) (username string, email string, super bool, ok bool) {
+	var u, e string
+	var sp int
+	if err := db.DB.QueryRow(`SELECT username, email, COALESCE(super,0) FROM admin WHERE id=?`, id).
+		Scan(&u, &e, &sp); err != nil {
+		return "", "", false, false
+	}
+	return u, e, sp == 1, true
+}
+
+// enabledSuperCount 当前启用的超级管理员数量（保护「最后一个 super」）
+func enabledSuperCount() int {
+	var n int
+	_ = db.DB.QueryRow(`SELECT COUNT(*) FROM admin WHERE COALESCE(super,0)=1 AND status=1`).Scan(&n)
+	return n
+}
 
 func AdminList(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.DB.Query(`SELECT id,username,email,status,super,created_at FROM admin ORDER BY id`)
@@ -59,6 +101,52 @@ func AdminUpdate(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "参数错误")
 		return
 	}
+	// 角色分级（P1-1）：管理操作需要带身份的会话；旧格式 token（无身份）要求重新登录
+	caller, ok := currentAdmin(r)
+	if !ok {
+		util.Fail(w, "登录状态缺少身份信息，请重新登录后再操作")
+		return
+	}
+	tu, te, tSuper, ok := adminByID(req.ID)
+	if !ok {
+		util.Fail(w, "账号不存在")
+		return
+	}
+	self := caller.ID == req.ID
+	if tSuper {
+		// super 账号受保护：非 super 一律不可修改（禁用/改邮箱/改用户名等）
+		if !caller.Super {
+			syslogFromRequest(r, "越权尝试", "普通管理员试图修改超级管理员 "+tu)
+			util.Fail(w, "无权修改超级管理员账号")
+			return
+		}
+		// super 的邮箱仅本人可改（防止其他 super 静默替换接收告警/找回邮件的邮箱）；
+		// 原样回传（未变更）放行，兼容编辑表单整表提交
+		if req.Email != nil && !self && *req.Email != te {
+			util.Fail(w, "超级管理员的邮箱仅允许本人修改")
+			return
+		}
+	}
+	if !caller.Super && !self {
+		util.Fail(w, "普通管理员只能修改自己的账号信息")
+		return
+	}
+	// 禁用保护：不能禁用自己；启用中的 super 至少保留一个
+	if req.Status != nil && *req.Status == 0 {
+		if self {
+			util.Fail(w, "不能禁用自己的账号")
+			return
+		}
+		if tSuper && enabledSuperCount() <= 1 {
+			util.Fail(w, "至少保留一个启用的超级管理员")
+			return
+		}
+	}
+	// 用户名变更仅超级管理员可执行（普通管理员改自己用户名易造成审计混淆）
+	if req.Username != nil && *req.Username != "" && !caller.Super {
+		util.Fail(w, "普通管理员不能修改用户名")
+		return
+	}
 	name := ""
 	if req.Username != nil {
 		name = *req.Username
@@ -79,7 +167,7 @@ func AdminUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if bcrypt.CompareHashAndPassword([]byte(curHash), []byte(req.OldPassword)) != nil {
-			db.Syslog("admin", "修改密码失败", "旧密码验证未通过", clientIP(r))
+			syslogFromRequest(r, "修改密码失败", "旧密码验证未通过")
 			util.Fail(w, "旧密码不正确，密码未修改")
 			return
 		}
@@ -88,7 +176,9 @@ func AdminUpdate(w http.ResponseWriter, r *http.Request) {
 			util.Fail(w, "更新失败")
 			return
 		}
-		db.Syslog("admin", "修改管理员密码", name, clientIP(r))
+		// 改密即吊销该管理员全部存量会话（含自己当前会话）
+		middleware.RevokeAdmin(req.ID)
+		syslogFromRequest(r, "修改管理员密码", name)
 	}
 	if req.Username != nil && *req.Username != "" {
 		_, _ = db.DB.Exec(`UPDATE admin SET username=? WHERE id=?`, *req.Username, req.ID)
@@ -97,9 +187,16 @@ func AdminUpdate(w http.ResponseWriter, r *http.Request) {
 		_, _ = db.DB.Exec(`UPDATE admin SET email=? WHERE id=?`, *req.Email, req.ID)
 	}
 	if req.Status != nil {
-		_, _ = db.DB.Exec(`UPDATE admin SET status=? WHERE id=?`, *req.Status, req.ID)
+		if _, err := db.DB.Exec(`UPDATE admin SET status=? WHERE id=?`, *req.Status, req.ID); err != nil {
+			util.Fail(w, "更新失败")
+			return
+		}
+		if *req.Status == 0 {
+			// 禁用账号即吊销其全部会话
+			middleware.RevokeAdmin(req.ID)
+		}
 	}
-	db.Syslog("admin", "更新管理员", name, clientIP(r))
+	syslogFromRequest(r, "更新管理员", name)
 	util.OKMsg(w, "已更新", nil)
 }
 
@@ -109,6 +206,27 @@ func AdminDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := util.ReadJSON(r, &req); err != nil || req.ID == 0 {
 		util.Fail(w, "参数错误")
+		return
+	}
+	// 角色分级（P1-1）：仅超级管理员可删除管理员账号
+	caller, ok := currentAdmin(r)
+	if !ok {
+		util.Fail(w, "登录状态缺少身份信息，请重新登录后再操作")
+		return
+	}
+	if !caller.Super {
+		syslogFromRequest(r, "越权尝试", "普通管理员试图删除管理员账号")
+		util.Fail(w, "仅超级管理员可删除管理员账号")
+		return
+	}
+	tu, _, tSuper, ok := adminByID(req.ID)
+	if !ok {
+		util.Fail(w, "账号不存在")
+		return
+	}
+	// super 账号不可被删除（即使由另一个 super 操作）
+	if tSuper {
+		util.Fail(w, "超级管理员账号不可删除")
 		return
 	}
 	var cnt int
@@ -121,10 +239,24 @@ func AdminDelete(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "删除失败")
 		return
 	}
+	// 删除账号后其会话立即失效（admin_id 仍可匹配，无需先删 admin_session）
+	middleware.RevokeAdmin(req.ID)
+	syslogFromRequest(r, "删除管理员", tu)
 	util.OKMsg(w, "已删除", nil)
 }
 
 func AdminAdd(w http.ResponseWriter, r *http.Request) {
+	// 角色分级（P1-1）：仅超级管理员可创建管理员（防止普通管理员自行扩权面）
+	caller, ok := currentAdmin(r)
+	if !ok {
+		util.Fail(w, "登录状态缺少身份信息，请重新登录后再操作")
+		return
+	}
+	if !caller.Super {
+		syslogFromRequest(r, "越权尝试", "普通管理员试图添加管理员")
+		util.Fail(w, "仅超级管理员可添加管理员账号")
+		return
+	}
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -140,7 +272,7 @@ func AdminAdd(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "创建失败（用户名可能已存在）")
 		return
 	}
-	db.Syslog("admin", "添加管理员", req.Username, clientIP(r))
+	syslogFromRequest(r, "添加管理员", req.Username)
 	util.OKMsg(w, "管理员已创建", nil)
 }
 
@@ -301,7 +433,7 @@ func SysUpdateKeyFile(w http.ResponseWriter, r *http.Request) {
 	}
 	// 标记为手工上传（自动续签状态里据此区分来源；续签成功后会被改回 acme）
 	db.SetSetting("cert_source", "upload")
-	db.Syslog("admin", "更新SSL证书", "", clientIP(r))
+	syslogFromRequest(r, "更新SSL证书", "")
 	util.OKMsg(w, "证书已更新并即时生效（无需重启服务）", nil)
 }
 
@@ -319,7 +451,7 @@ func SysBackup(w http.ResponseWriter, r *http.Request) {
 	}
 	st, _ := os.Stat(path)
 	_, _ = db.DB.Exec(`INSERT INTO backup(filename,size,created_at) VALUES(?,?,datetime('now','localtime'))`, name, st.Size())
-	db.Syslog("admin", "创建备份", name, clientIP(r))
+	syslogFromRequest(r, "创建备份", name)
 	util.OK(w, map[string]string{"filename": name, "size": fmt.Sprint(st.Size())})
 }
 
@@ -451,7 +583,7 @@ func SysBackupDelete(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "删除记录失败: "+err.Error())
 		return
 	}
-	db.Syslog("admin", "删除备份", name, clientIP(r))
+	syslogFromRequest(r, "删除备份", name)
 	util.OKMsg(w, "已删除备份 "+name, nil)
 }
 
@@ -487,7 +619,7 @@ func SysBackupUpload(w http.ResponseWriter, r *http.Request) {
 		_, _ = db.DB.Exec(`INSERT INTO backup(filename,size,created_at) VALUES(?,?,datetime('now','localtime'))`,
 			name, st.Size())
 	}
-	db.Syslog("admin", "上传备份", name, clientIP(r))
+	syslogFromRequest(r, "上传备份", name)
 	util.OKMsg(w, "备份文件已上传: "+name, nil)
 }
 
@@ -596,7 +728,7 @@ func FWAddRule(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = db.DB.Exec(`INSERT INTO port_rule(port,proto,action,source,note,created_at) VALUES(?,?,?,?,?,datetime('now','localtime'))`,
 		req.Port, req.Proto, req.Action, req.Source, req.Note)
-	db.Syslog("admin", "添加防火墙规则", fmt.Sprintf("%d/%s %s", req.Port, req.Proto, req.Action), clientIP(r))
+	syslogFromRequest(r, "添加防火墙规则", fmt.Sprintf("%d/%s %s", req.Port, req.Proto, req.Action))
 	util.OKMsg(w, "规则已生效", nil)
 }
 
@@ -847,10 +979,10 @@ func LdapSync(w http.ResponseWriter, r *http.Request) {
 	// 以 LDAP 为准双向校正本地 LDAP 账号状态（LDAP 删号 → 本地禁用；LDAP 恢复 → 本地启用）
 	disabled, enabled, recErr := reconcileLDAPStatus(users)
 	if recErr != nil {
-		db.Syslog("admin", "LDAP 状态同步跳过", recErr.Error(), clientIP(r))
+		syslogFromRequest(r, "LDAP 状态同步跳过", recErr.Error())
 	}
 	if disabled > 0 || enabled > 0 {
-		db.Syslog("admin", "LDAP 账号状态同步", fmt.Sprintf("自动禁用 %d，恢复启用 %d", disabled, enabled), clientIP(r))
+		syslogFromRequest(r, "LDAP 账号状态同步", fmt.Sprintf("自动禁用 %d，恢复启用 %d", disabled, enabled))
 	}
 	syncAuthFiles()
 	license.Invalidate()
@@ -958,7 +1090,7 @@ func LdapImport(w http.ResponseWriter, r *http.Request) {
 	}
 	syncAuthFiles()
 	license.Invalidate()
-	db.Syslog("admin", "导入 LDAP 用户", fmt.Sprintf("新增 %d 跳过 %d 配额受限 %d", added, skipped, quotaFull), clientIP(r))
+	syslogFromRequest(r, "导入 LDAP 用户", fmt.Sprintf("新增 %d 跳过 %d 配额受限 %d", added, skipped, quotaFull))
 	util.OK(w, map[string]int{"added": added, "skipped": skipped, "total": len(users),
 		"quota_full": quotaFull, "user_limit": limit, "user_used": used})
 }
@@ -995,6 +1127,8 @@ func SyslogTruncate(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "清空失败")
 		return
 	}
+	// 清空本身也必须留痕：记录是谁在何时清除了日志
+	syslogFromRequest(r, "清空系统日志", "")
 	util.OKMsg(w, "系统日志已清空", nil)
 }
 

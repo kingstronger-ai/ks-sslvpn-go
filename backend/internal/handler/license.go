@@ -4,7 +4,6 @@ package handler
 import (
 	"net/http"
 
-	"sslvpn/internal/db"
 	"sslvpn/internal/license"
 	"sslvpn/internal/util"
 )
@@ -31,7 +30,7 @@ func LicenseActivate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st := license.Check()
-	db.Syslog("admin", "激活许可", st.Describe(), clientIP(r))
+	syslogFromRequest(r, "激活许可", st.Describe())
 	util.OKMsg(w, "授权已激活", st)
 }
 
@@ -40,6 +39,6 @@ func LicenseClear(w http.ResponseWriter, r *http.Request) {
 	license.ReleaseSeat()
 	license.Clear()
 	license.Invalidate()
-	db.Syslog("admin", "解除激活", "", clientIP(r))
+	syslogFromRequest(r, "解除激活", "")
 	util.OKMsg(w, "已解除激活", license.Check())
 }

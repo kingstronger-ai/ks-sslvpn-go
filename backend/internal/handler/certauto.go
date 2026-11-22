@@ -176,7 +176,7 @@ func CertAutoSave(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "保存失败: "+err.Error())
 		return
 	}
-	db.Syslog("admin", "保存证书自动续签配置", strings.Join(c.Domains, ","), clientIP(r))
+	syslogFromRequest(r, "保存证书自动续签配置", strings.Join(c.Domains, ","))
 	util.OKMsg(w, "配置已保存", nil)
 }
 
@@ -220,7 +220,7 @@ func CertAutoIssue(w http.ResponseWriter, r *http.Request) {
 			log.Printf("证书签发失败: %v", err)
 		}
 	}()
-	db.Syslog("admin", "手动触发证书签发", strings.Join(c.Domains, ","), clientIP(r))
+	syslogFromRequest(r, "手动触发证书签发", strings.Join(c.Domains, ","))
 	util.OKMsg(w, "已开始签发，通常 1-3 分钟；可点「刷新状态」查看结果", nil)
 }
 

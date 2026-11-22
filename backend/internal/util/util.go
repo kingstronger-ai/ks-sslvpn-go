@@ -44,6 +44,13 @@ func FailCode(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, Resp{Code: code, Msg: msg})
 }
 
+// FailStatus 指定 HTTP 状态码的失败响应（如 400 参数错误、405 方法不允许）
+func FailStatus(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(Resp{Code: 0, Msg: msg})
+}
+
 func writeJSON(w http.ResponseWriter, r Resp) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(r)

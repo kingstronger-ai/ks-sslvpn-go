@@ -41,6 +41,7 @@ func regF(method, path string, auth bool, feature string, h http.HandlerFunc) {
 func init() {
 	// ---- 公开（登录/注册/找回/轮询）----
 	reg("POST", "/logincheck", false, LoginCheck)
+	reg("POST", "/loginmfa", false, LoginMFA) // 管理员 MFA 二次验证（票据+TOTP/恢复码换正式会话）
 	reg("GET", "/logout", false, Logout)
 	reg("GET", "/captcha", false, Captcha)
 	reg("POST", "/getSafeCode", false, GetSafeCode)
@@ -65,7 +66,9 @@ func init() {
 	reg("GET", "/account/systeminfo", true, SystemInfo)
 	reg("POST", "/account/exportDatabase", true, AccountExport)
 	reg("POST", "/account/createAuthorize", true, CreateAuthorize)
-	reg("GET", "/account/disableVpnServer", true, DisableVPNServer)
+	// 有副作用的接口一律 POST（F-02）：SameSite=Lax 下顶层 GET 导航仍会带 Cookie，
+	// GET 形态的状态变更接口可被跨站链接驱动；同路径 GET 由 apiEntry 返回 405。
+	reg("POST", "/account/disableVpnServer", true, DisableVPNServer)
 	reg("POST", "/account/batchUpload", true, AccountBatchUpload)
 	reg("POST", "/account/batchDelete", true, AccountBatchDelete)
 	reg("POST", "/account/batchSetExpire", true, AccountBatchSetExpire)
@@ -76,7 +79,7 @@ func init() {
 	reg("POST", "/account/showDetail", true, AccountDetail)
 	reg("POST", "/account/downloadUserCert", true, DownloadUserCert)
 	reg("POST", "/account/getGroupAttach", true, GroupAttach)
-	reg("GET", "/account/batchSendMail", true, BatchSendMail)
+	reg("POST", "/account/batchSendMail", true, BatchSendMail)
 	reg("GET", "/account/batchBuildUserFile", true, BatchBuildUserFile)
 
 	// ---- 日志 ----
@@ -85,13 +88,15 @@ func init() {
 	reg("GET", "/log/access", true, LogAccess)
 	reg("GET", "/log/clientip", true, LogClientIP)
 	reg("GET", "/log/vpnserverlog", true, LogVPNServer)
-	reg("GET", "/log/deleteAccessLogs", true, DeleteAccessLogs)
+	reg("POST", "/log/deleteAccessLogs", true, DeleteAccessLogs)
 	reg("GET", "/log/downloadVpnServerLogs", true, DownloadVPNServerLogs)
-	reg("GET", "/log/editFilterRule", true, EditFilterRule)
+	reg("POST", "/log/editFilterRule", true, EditFilterRule)
 	reg("POST", "/log/updateFilter", true, UpdateFilter)
 	reg("GET", "/log/showRouterTable", true, ShowRouterTable)
 	reg("GET", "/syslog/list", true, SyslogList)
-	reg("GET", "/syslog/truncate", true, SyslogTruncate)
+	reg("POST", "/syslog/truncate", true, SyslogTruncate)
+	reg("POST", "/syslog/export", true, AuditExport) // CSV/JSON 下载
+	reg("GET", "/syslog/stats", true, SyslogStats)   // 近 30 天按 action 聚合
 
 	// ---- 管理员 ----
 	reg("GET", "/admin/list", true, AdminList)
@@ -99,6 +104,16 @@ func init() {
 	reg("POST", "/admin/updateUserAdmin", true, AdminUpdate)
 	reg("POST", "/admin/delUser", true, AdminDelete)
 	reg("POST", "/admin/addAccount", true, AdminAdd)
+	// ---- 管理员会话管理（B1-1）----
+	reg("GET", "/admin/sessions", true, AdminSessions)
+	reg("POST", "/admin/session/revoke", true, AdminSessionRevoke)
+	reg("POST", "/admin/session/revokeAll", true, AdminSessionRevokeAll)
+	// ---- 管理员 MFA（B1-2）----
+	reg("GET", "/admin/mfa/status", true, AdminMFAStatus)
+	reg("POST", "/admin/mfa/setup", true, AdminMFASetup)
+	reg("POST", "/admin/mfa/enable", true, AdminMFAEnable)
+	reg("POST", "/admin/mfa/disable", true, AdminMFADisable)
+	reg("POST", "/admin/mfa/recovery", true, AdminMFARecovery)
 
 	// ---- 系统设置 ----
 	reg("POST", "/system/updateLogin", true, SysUpdateLogin)
@@ -209,6 +224,7 @@ func init() {
 	reg("POST", "/linuxcc/update", true, GlobalCfgUpdate)
 	reg("GET", "/fw/getPortRuleList", true, FWRuleList)
 	reg("POST", "/fw/addPortRule", true, FWAddRule)
+	reg("POST", "/system/delPortRule", true, PortRuleDelete) // 先删 iptables 规则再删记录
 
 	// ---- 域名分流（域名 → 定时解析 IPv4 → /32 路由下发）—— 专业版功能 ----
 	regF("GET", "/domainRoute/list", true, license.FeatDomainRoute, DomainRouteList)

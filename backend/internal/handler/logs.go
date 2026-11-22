@@ -94,7 +94,7 @@ func LogKick(w http.ResponseWriter, r *http.Request) {
 	if len(res.NotOnline) > 0 {
 		detail += "；已离线: " + strings.Join(res.NotOnline, ", ")
 	}
-	db.Syslog("admin", "强制用户下线", detail, clientIP(r))
+	syslogFromRequest(r, "强制用户下线", detail)
 	util.OKMsg(w, fmt.Sprintf("已强制下线 %d 人，客户端将退出且不会自动重连", res.Kicked), map[string]any{
 		"kicked": res.Kicked, "failed": res.Failed, "not_online": res.NotOnline,
 	})
@@ -190,6 +190,7 @@ func DeleteAccessLogs(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	syslogFromRequest(r, "删除访问日志", fmt.Sprintf("日期=%s 删除 %d 个文件", day, removed))
 	util.OK(w, map[string]int{"removed": removed})
 }
 
@@ -238,6 +239,7 @@ func UpdateFilter(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.DelID > 0 {
 		_, _ = db.DB.Exec(`DELETE FROM log_filter WHERE id=?`, req.DelID)
+		syslogFromRequest(r, "删除日志过滤规则", fmt.Sprint(req.DelID))
 		util.OKMsg(w, "过滤规则已删除", nil)
 		return
 	}

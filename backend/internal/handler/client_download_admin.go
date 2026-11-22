@@ -128,7 +128,7 @@ func ClientDownloadConfigSave(w http.ResponseWriter, r *http.Request) {
 	db.SetSetting(setMailAttachCfg, flag(req.AttachCfg, "1"))
 	db.SetSetting(setMailAttachWin, flag(req.AttachWin, "1"))
 	db.SetSetting(setMailAttachMac, flag(req.AttachMac, "1"))
-	db.Syslog("admin", "客户端下载设置", "开放="+enabled+"，范围="+scope+"，邮件附件开关="+db.GetSetting(setMailAttach), clientIP(r))
+	syslogFromRequest(r, "客户端下载设置", "开放="+enabled+"，范围="+scope+"，邮件附件开关="+db.GetSetting(setMailAttach))
 	util.OKMsg(w, "客户端下载设置已保存", nil)
 }
 
@@ -218,7 +218,7 @@ func ClientDownloadUpload(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "保存失败: "+err.Error())
 		return
 	}
-	db.Syslog("admin", "上传客户端安装包", platform+" / "+name+" / "+humanSize(n), clientIP(r))
+	syslogFromRequest(r, "上传客户端安装包", platform+" / "+name+" / "+humanSize(n))
 	util.OKMsg(w, "已上传 "+name+"，同平台旧包已自动替换", map[string]any{"filename": name, "size": n})
 }
 
@@ -246,7 +246,7 @@ func ClientDownloadDelete(w http.ResponseWriter, r *http.Request) {
 		util.Fail(w, "删除失败: "+err.Error())
 		return
 	}
-	db.Syslog("admin", "删除客户端安装包", name, clientIP(r))
+	syslogFromRequest(r, "删除客户端安装包", name)
 	util.OKMsg(w, "已删除 "+name, nil)
 }
 
@@ -451,10 +451,10 @@ func ClientDownloadMail(w http.ResponseWriter, r *http.Request) {
 	origin := ssoDerivedOrigin(r)
 	subject, body := clientDownloadMailCompose(name, int64(len(data)), origin)
 	if err := mail.SendWithAttachment(cfg, email, subject, body, name, data); err != nil {
-		db.Syslog("admin", "邮件发送安装包失败", name+" → "+email+"："+err.Error(), clientIP(r))
+		syslogFromRequest(r, "邮件发送安装包失败", name+" → "+email+"："+err.Error())
 		util.Fail(w, "发送失败: "+err.Error())
 		return
 	}
-	db.Syslog("admin", "邮件发送安装包", name+" → "+email, clientIP(r))
+	syslogFromRequest(r, "邮件发送安装包", name+" → "+email)
 	util.OKMsg(w, "已发送 "+name+" 到 "+email+"（附件 "+humanSize(int64(len(data)))+"，大附件请留意对方邮箱限制）", nil)
 }

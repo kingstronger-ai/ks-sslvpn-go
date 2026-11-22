@@ -56,6 +56,9 @@ func migrate() error {
 			email TEXT DEFAULT '',
 			status INTEGER DEFAULT 1,          -- 1 启用 0 禁用
 			super INTEGER DEFAULT 0,
+			totp_secret TEXT DEFAULT '',       -- 管理员 TOTP 密钥（启用 MFA 时才写入）
+			totp_enabled INTEGER DEFAULT 0,    -- 管理员 MFA 开关
+			totp_recovery TEXT DEFAULT '',     -- 恢复码 JSON 数组（元素为 sha256 摘要，单次使用）
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
 		// VPN 账号
@@ -108,6 +111,9 @@ func migrate() error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT UNIQUE NOT NULL,
 			note TEXT DEFAULT '',
+			allowed_services TEXT DEFAULT '',  -- 逗号分隔 service id，空=全部（字段先落地，判定逻辑下版本启用）
+			max_concurrent INTEGER DEFAULT 0,  -- 0=不限（同上）
+			policy_note TEXT DEFAULT '',      -- 组策略说明
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
 		// 分组-服务关联
 		`CREATE TABLE IF NOT EXISTS group_service(
@@ -146,10 +152,22 @@ func migrate() error {
 		`CREATE TABLE IF NOT EXISTS syslog(
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			admin TEXT DEFAULT '',
+			admin_id INTEGER DEFAULT 0,       -- 真实操作主体 id（B1 审计归因）
 			action TEXT DEFAULT '',
 			detail TEXT DEFAULT '',
 			ip TEXT DEFAULT '',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
+		// 管理员会话（B1-1：身份绑定 + 服务端可吊销）
+		`CREATE TABLE IF NOT EXISTS admin_session(
+			jti TEXT PRIMARY KEY,
+			admin_id INTEGER DEFAULT 0,
+			username TEXT DEFAULT '',
+			created_at INTEGER DEFAULT 0,
+			expires_at INTEGER DEFAULT 0,
+			revoked INTEGER DEFAULT 0,
+			ip TEXT DEFAULT '',
+			user_agent TEXT DEFAULT '',
+			last_seen INTEGER DEFAULT 0)`,
 		// 虚拟 IP 绑定登记（首次连接按顺序分配后在此登记，供到期回收）
 		`CREATE TABLE IF NOT EXISTS ip_binding(
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -219,6 +237,9 @@ func migrate() error {
 			expires_at INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE INDEX IF NOT EXISTS idx_account_expire ON account(expire_date)`,
 		`CREATE INDEX IF NOT EXISTS idx_syslog_time ON syslog(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_syslog_action ON syslog(action,created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_admin_session_admin ON admin_session(admin_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_admin_session_expire ON admin_session(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_sso_device_expire ON sso_device(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_sso_device_state ON sso_device(state)`,
 		`CREATE INDEX IF NOT EXISTS idx_sso_token_expire ON sso_token(expires_at)`,
@@ -249,6 +270,14 @@ func migrate() error {
 		{"ldap_conf", "tls_mode", "TEXT DEFAULT ''"},
 		{"ldap_conf", "ca_cert", "TEXT DEFAULT ''"},
 		{"ldap_conf", "tls_server_name", "TEXT DEFAULT ''"},
+		// B1：管理员 MFA、审计主体、会话与分组策略字段（旧库补列）
+		{"admin", "totp_secret", "TEXT DEFAULT ''"},
+		{"admin", "totp_enabled", "INTEGER DEFAULT 0"},
+		{"admin", "totp_recovery", "TEXT DEFAULT ''"},
+		{"syslog", "admin_id", "INTEGER DEFAULT 0"},
+		{"group", "allowed_services", "TEXT DEFAULT ''"},
+		{"group", "max_concurrent", "INTEGER DEFAULT 0"},
+		{"group", "policy_note", "TEXT DEFAULT ''"},
 	} {
 		if err := ensureColumn(c[0], c[1], c[2]); err != nil {
 			return err
@@ -302,9 +331,12 @@ func migrateDomainRouteUser() error {
 	return tx.Commit()
 }
 
-// ensureColumn 若表缺少某列则补上
+// ensureColumn 若表缺少某列则补上。表名/列名一律加双引号：
+// "group" 等 SQL 关键字表名在 PRAGMA table_info / ALTER TABLE 中必须引用。
 func ensureColumn(table, col, decl string) error {
-	rows, err := DB.Query(`PRAGMA table_info(` + table + `)`)
+	quote := func(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+	qt, qc := quote(table), quote(col)
+	rows, err := DB.Query(`PRAGMA table_info(` + qt + `)`)
 	if err != nil {
 		return err
 	}
@@ -322,7 +354,7 @@ func ensureColumn(table, col, decl string) error {
 	if exists {
 		return nil
 	}
-	_, err = DB.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` ` + decl)
+	_, err = DB.Exec(`ALTER TABLE ` + qt + ` ADD COLUMN ` + qc + ` ` + decl)
 	return err
 }
 
@@ -345,10 +377,23 @@ func SetSetting(key, val string) {
 	}
 }
 
-// Syslog 写系统日志
+// Syslog 写系统日志；admin_id 由用户名反查（找不到记为 0）。
+// 调用方若已持有身份 id，请用 SyslogWithID 避免重复查询。
 func Syslog(admin, action, detail, ip string) {
-	_, _ = DB.Exec(`INSERT INTO syslog(admin,action,detail,ip,created_at) VALUES(?,?,?,?,datetime('now','localtime'))`,
-		admin, action, detail, ip)
+	var id int64
+	if DB != nil && admin != "" {
+		_ = DB.QueryRow(`SELECT id FROM admin WHERE username=?`, admin).Scan(&id)
+	}
+	SyslogWithID(admin, action, detail, ip, id)
+}
+
+// SyslogWithID 写系统日志并显式记录真实操作主体 id（B1 审计归因）。
+func SyslogWithID(admin, action, detail, ip string, adminID int64) {
+	if DB == nil {
+		return
+	}
+	_, _ = DB.Exec(`INSERT INTO syslog(admin,admin_id,action,detail,ip,created_at)
+		VALUES(?,?,?,?,?,datetime('now','localtime'))`, admin, adminID, action, detail, ip)
 }
 
 // Now 统一时间格式

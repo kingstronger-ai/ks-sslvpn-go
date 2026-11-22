@@ -709,10 +709,25 @@ func SSODevicePoll(w http.ResponseWriter, r *http.Request) {
 		ssoJSON(w, 410, map[string]any{"ok": false, "status": "consumed", "state": "consumed", "error": "登录凭证已经领取"})
 		return
 	}
-	// authorized：一次性交出用户名与口令，随后立即清空明文
-	if _, err := db.DB.Exec(`UPDATE sso_device SET status='delivered',vpn_plain='' WHERE device_code=? AND status='authorized'`,
-		req.DeviceCode); err != nil {
+	// authorized：一次性交出用户名与口令。校验+交付改为单条条件 UPDATE（P2-5 TOCTOU）：
+	// 仅当仍处于 authorized 且未过期时才会置为 delivered 并清空明文；
+	// RowsAffected=0 说明凭证已被并发请求消费或已过期，拒绝重复交付。
+	res, err := db.DB.Exec(`UPDATE sso_device SET status='delivered',vpn_plain=''
+		WHERE device_code=? AND status='authorized' AND expires_at>?`,
+		req.DeviceCode, time.Now().Unix())
+	if err != nil {
 		ssoJSON(w, 500, map[string]any{"ok": false, "error": "服务内部错误"})
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		var st string
+		var exp int64
+		if e := db.DB.QueryRow(`SELECT status,expires_at FROM sso_device WHERE device_code=?`, req.DeviceCode).
+			Scan(&st, &exp); e == nil && st == "delivered" {
+			ssoJSON(w, 410, map[string]any{"ok": false, "status": "consumed", "state": "consumed", "error": "登录凭证已经领取"})
+		} else {
+			ssoJSON(w, 410, map[string]any{"ok": false, "status": "expired", "state": "expired", "error": "登录请求已过期"})
+		}
 		return
 	}
 	cfg := feishuCfg()
@@ -1124,9 +1139,9 @@ func SSOCfgSave(w http.ResponseWriter, r *http.Request) {
 		}
 		return false
 	}())
-	db.Syslog("admin", "更新扫码登录配置", "default="+ssoDefaultProvider()+" enabled="+fmt.Sprint(ssoEnabledProviders())+" mock="+fmt.Sprint(mockActive), clientIP(r))
+	syslogFromRequest(r, "更新扫码登录配置", "default="+ssoDefaultProvider()+" enabled="+fmt.Sprint(ssoEnabledProviders())+" mock="+fmt.Sprint(mockActive))
 	if mockActive {
-		db.Syslog("admin", "扫码登录联调模式已开启", "mock 身份可由回调参数伪造，仅限开发环境；生产环境应设 SSLVPN_ALLOW_SSO_MOCK=0", clientIP(r))
+		syslogFromRequest(r, "扫码登录联调模式已开启", "mock 身份可由回调参数伪造，仅限开发环境；生产环境应设 SSLVPN_ALLOW_SSO_MOCK=0")
 	}
 	util.OKMsg(w, "扫码登录配置已保存，立即生效", map[string]any{"enabled": ssoEnabledProviders(), "mock": mockActive})
 }

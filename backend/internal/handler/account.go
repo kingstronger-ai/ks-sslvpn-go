@@ -143,7 +143,7 @@ func AccountAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	syncAuthFiles()
 	sendAccountMail(&a)
-	db.Syslog("admin", "添加VPN用户", a.Username, clientIP(r))
+	syslogFromRequest(r, "添加VPN用户", a.Username)
 	util.OKMsg(w, "创建成功", map[string]any{"username": a.Username, "password": a.Password})
 }
 
@@ -308,7 +308,7 @@ func MailTemplateUpdate(w http.ResponseWriter, r *http.Request) {
 	db.SetSetting("mail_body", strings.TrimSpace(req.Body))
 	db.SetSetting("mail_subject_ldap", strings.TrimSpace(req.SubjectLDAP))
 	db.SetSetting("mail_body_ldap", strings.TrimSpace(req.BodyLDAP))
-	db.Syslog("admin", "修改邮件模板", "", clientIP(r))
+	syslogFromRequest(r, "修改邮件模板", "")
 	util.OKMsg(w, "邮件模板已保存", nil)
 }
 
@@ -346,7 +346,7 @@ func AccountDelete(w http.ResponseWriter, r *http.Request) {
 		rows.Close()
 	}
 	syncAuthFiles()
-	db.Syslog("admin", "删除VPN用户", username, clientIP(r))
+	syslogFromRequest(r, "删除VPN用户", username)
 	util.OKMsg(w, "删除成功（证书已吊销）", nil)
 }
 
@@ -379,7 +379,7 @@ func AccountUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	syncAuthFiles()
-	db.Syslog("admin", "更新VPN用户", a.Username, clientIP(r))
+	syslogFromRequest(r, "更新VPN用户", a.Username)
 	util.OKMsg(w, "更新成功", nil)
 }
 
@@ -621,6 +621,7 @@ func AccountBatchDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	syncAuthFiles()
 	license.Invalidate()
+	syslogFromRequest(r, "批量删除VPN用户", fmt.Sprintf("删除 %d 个", n))
 	util.OK(w, map[string]int{"deleted": n})
 }
 
@@ -669,7 +670,7 @@ func AccountBatchSetExpire(w http.ResponseWriter, r *http.Request) {
 	if expDesc == "" {
 		expDesc = "永久"
 	}
-	db.Syslog("admin", "批量设置到期时间", fmt.Sprintf("到期=%s 账号数=%d", expDesc, n), clientIP(r))
+	syslogFromRequest(r, "批量设置到期时间", fmt.Sprintf("到期=%s 账号数=%d", expDesc, n))
 	util.OK(w, map[string]any{"updated": n, "expire_date": exp})
 }
 

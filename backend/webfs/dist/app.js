@@ -4,6 +4,8 @@ const $app = document.getElementById("app");
 /* 后端接口统一前缀（与后端 handler.APIPrefix 保持一致；改这里即可整体迁移） */
 const API_BASE = "/api/v1";
 let token = localStorage.getItem("sslvpn_token") || "";
+let meSuper = false;   // 当前登录管理员是否为超级管理员（登录响应返回，用于前端显隐）
+let meName = "";       // 当前登录管理员用户名
 let sysInfo = null; // 系统信息缓存（欢迎横幅用）
 
 /* 品牌信息（名称/Logo/版权可由「全局设置」自定义，登录页与内部界面共用） */
@@ -225,9 +227,12 @@ async function doLogin() {
   try {
     const r = await api("/logincheck", { body: {
       username: fv("lgUser"), password: fv("lgPass"), captcha: fv("lgCap"), code_id: capID } });
-    if (r.code === 1) { token = r.data.token; localStorage.setItem("sslvpn_token", token); enter("dash"); }
-    else {
-      toast(r.msg, false);
+    if (r.code === 1) {
+      loginSuccess(r.data, fv("lgUser"));
+    } else if (r.code === 10 && r.mfa_token) {
+      showMfaLogin(r.mfa_token, fv("lgUser"));   // 已开 MFA：密码正确，只发短期票据
+    } else {
+      toast(r.msg || "登录失败", false);
       const cap = document.getElementById("lgCap");
       if (cap) cap.value = "";            // 验证码一次性消费，失败后清空便于直接重输
       loadCaptcha();
@@ -238,15 +243,60 @@ async function doLogin() {
     if (b) b.disabled = false;
   }
 }
+/* 登录成功统一入口：密码直登与 MFA 二次验证都走这里 */
+function loginSuccess(data, fallbackName) {
+  token = data.token || ""; localStorage.setItem("sslvpn_token", token);
+  meSuper = data.super === "1";
+  meName = data.username || fallbackName || "";
+  enter("dash");
+}
+/* MFA 二次验证：6 位动态码（或一次性恢复码）换正式会话 */
+let mfaTicket = "", mfaPending = false;
+function showMfaLogin(ticket, username) {
+  mfaTicket = ticket;
+  const card = document.querySelector(".login-card");
+  if (!card) return renderLogin();
+  card.innerHTML = `<h1>${brandHTML(30)} ${esc(BRAND.name)}</h1>
+    <p class="sub">二次验证 · ${esc(username)}</p>
+    <div class="tip-banner">ⓘ 该管理员已开启双因子认证，请输入验证器 App 中的 6 位动态码（也可输入一次性恢复码）。</div>
+    <div class="form-row"><label>动态码</label><input id="mfaOtp" inputmode="numeric" maxlength="16" autocomplete="one-time-code" placeholder="6 位动态码 / 恢复码"></div>
+    <button class="primary" id="mfaBtn" style="width:100%;justify-content:center;padding:11px">验 证 并 登 录</button>
+    <div style="text-align:center;margin-top:12px"><a class="lk" href="javascript:;" onclick="backToLogin()">← 返回重新登录</a></div>`;
+  document.getElementById("mfaBtn").onclick = doMfaLogin;
+  const otp = document.getElementById("mfaOtp");
+  otp.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); doMfaLogin(); } });
+  otp.focus();
+}
+function backToLogin() { mfaTicket = ""; renderLogin(); }
+async function doMfaLogin() {
+  if (mfaPending || !mfaTicket) return;
+  const otp = (fv("mfaOtp") || "").trim();
+  if (!otp) return toast("请输入动态码或恢复码", false);
+  mfaPending = true;
+  const btn = document.getElementById("mfaBtn");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api("/loginmfa", { body: { mfa_token: mfaTicket, otp } });
+    if (r.code === 1) { loginSuccess(r.data, ""); return; }
+    toast(r.msg || "验证失败", false);
+    const f = document.getElementById("mfaOtp");
+    if (f) { f.value = ""; f.focus(); }
+  } finally {
+    mfaPending = false;
+    if (btn) btn.disabled = false;
+  }
+}
 function logout(silent) {
   if (!silent) api("/logout").catch(() => {});
   token = ""; localStorage.removeItem("sslvpn_token");
+  meSuper = false; meName = "";
   renderLogin();
 }
 
 /* ================= 主布局（分组侧栏 + 顶栏） ================= */
 const NAV = [
   { title: "运行监控", pages: [["dash", "◎", "运行概览"]] },
+  { title: "监控与安全", pages: [["health", "💚", "健康状态"], ["alert", "🔔", "告警设置"], ["security", "🔐", "安全设置"]] },
   { title: "用户与权限", pages: [["users", "👤", "用户账号"], ["ccd", "⚙", "用户策略"], ["ldap", "🔑", "LDAP 目录"], ["online", "📶", "在线会话"]] },
   { title: "连接管理", pages: [["groups", "🗂", "用户分组"], ["services", "🖧", "连接配置"], ["domain", "🌐", "域名分流"]] },
   { title: "系统设置", pages: [["backup", "💾", "备份恢复"], ["clientdl", "⬇", "客户端下载"], ["smtp", "✉", "邮件服务"], ["sso", "🪪", "扫码登录"], ["sys", "☑", "全局设置"], ["fw", "🧱", "访问控制"], ["admins", "🛡", "管理员"], ["license", "🔐", "许可管理"], ["cert", "🔒", "证书管理"], ["upgrade", "⬆", "版本升级"]] },
@@ -255,7 +305,8 @@ const NAV = [
 const ROUTES = { dash: pageDash, users: pageUsers, ccd: pageCcd, ldap: pageLdap, online: pageOnline,
   groups: pageGroups, services: pageServices, backup: pageBackup, smtp: pageSmtp, sys: pageSys,
   fw: pageFW, authlog: pageAuthLog, syslog: pageSysLog, license: pageLicense, admins: pageAdmins, cert: pageCert,
-  sso: pageFeishu, domain: pageDomain, clientdl: pageClientDownload, upgrade: pageUpgrade };
+  sso: pageFeishu, domain: pageDomain, clientdl: pageClientDownload, upgrade: pageUpgrade,
+  health: pageHealth, alert: pageAlert, security: pageSecurity };
 
 function renderLayout(page) {
   $app.innerHTML = `
@@ -2018,17 +2069,27 @@ async function pageAdmins(main) {
   main.innerHTML = `<div class="card">
     <div class="topbar"><h3 style="margin:0">🛡 管理员</h3>
       <div class="inline">
-        <button class="primary" onclick="adminAddModal()">＋ 添加管理员</button>
+        ${meSuper ? '<button class="primary" onclick="adminAddModal()">＋ 添加管理员</button>' : '<span class="muted">仅超级管理员可添加/删除管理员</span>'}
         <button class="ghost" onclick="enter('admins')">⟳ 刷新</button>
       </div></div>
     <div id="admTable">${loading}</div>
-    <p class="muted" style="margin-top:10px">ⓘ 管理员用于登录本管理后台；密码以 bcrypt 加密存储，编辑时留空密码表示不修改。至少需保留一个管理员。</p></div>`;
+    <p class="muted" style="margin-top:10px">ⓘ 管理员用于登录本管理后台；密码以 bcrypt 加密存储，编辑时留空密码表示不修改。至少需保留一个管理员。超级管理员账号不可删除/禁用。</p></div>
+  <div class="card" style="margin-top:16px">
+    <div class="topbar"><h3 style="margin:0">📱 管理员会话</h3>
+      <button class="orange" onclick="sessionRevokeAll()">⏻ 踢出我全部设备</button></div>
+    <div id="sessTable">${loading}</div>
+    <p class="muted" style="margin-top:10px">ⓘ 吊销后对应设备需重新登录；普通管理员只能吊销自己的会话，超级管理员可吊销任意会话。当前会话会以「当前」标出。</p></div>`;
   renderAdminTable();
+  renderAdminSessions();
 }
 async function renderAdminTable() {
   const d = await api("/admin/list");
   const list = d.data.list || [];
-  const rows = list.map(a => `<tr>
+  const rows = list.map(a => {
+    // 与后端角色分级保持一致：普通管理员只能编辑自己；super 账号不可删除
+    const canEdit = meSuper || a.username === meName;
+    const canDel = meSuper && !a.super;
+    return `<tr>
     <td>${a.id}</td>
     <td><b>${esc(a.username)}</b></td>
     <td>${esc(a.email || "-")}</td>
@@ -2036,8 +2097,9 @@ async function renderAdminTable() {
     <td>${a.super ? '<span class="badge blue">超级管理员</span>' : '<span class="badge gray">普通管理员</span>'}</td>
     <td class="muted">${esc(a.created_at || "-")}</td>
     <td class="inline" style="flex-wrap:nowrap">
-      <a href="javascript:;" class="lk" onclick="adminEditModal(${a.id},'${jsq(a.username)}','${jsq(a.email || "")}',${a.status})">编辑</a>
-      <a href="javascript:;" class="lk r" onclick="adminDel(${a.id},'${jsq(a.username)}')">删除</a></td></tr>`).join("");
+      ${canEdit ? `<a href="javascript:;" class="lk" onclick="adminEditModal(${a.id},'${jsq(a.username)}','${jsq(a.email || "")}',${a.status}${meSuper ? "" : ",true"})">编辑</a>` : ""}
+      ${canDel ? `<a href="javascript:;" class="lk r" onclick="adminDel(${a.id},'${jsq(a.username)}')">删除</a>` : ""}</td></tr>`;
+  }).join("");
   document.getElementById("admTable").innerHTML = list.length ? `<table>
     <tr><th>ID</th><th>用户名</th><th>邮箱</th><th>状态</th><th>角色</th><th>创建时间</th><th>操作</th></tr>${rows}</table>`
     : `<p class="muted" style="text-align:center;padding:30px 0">暂无管理员</p>`;
@@ -2053,27 +2115,68 @@ function adminAddModal() {
       toast("管理员已创建"); enter("admins");
     });
 }
-function adminEditModal(id, name, email, status) {
+function adminEditModal(id, name, email, status, selfOnly) {
+  // selfOnly=true（普通管理员改自己）：不能改用户名/状态，仅可改密码与邮箱
   formModal("编辑管理员：" + esc(name), `
-    <div class="form-row"><label>用户名</label><input id="aeName" value="${esc(name)}"></div>
+    ${selfOnly ? "" : `<div class="form-row"><label>用户名</label><input id="aeName" value="${esc(name)}"></div>`}
     <div class="form-row"><label>新密码</label><input id="aePass" type="password" placeholder="留空则不修改密码"></div>
     <div class="form-row"><label>旧密码</label><input id="aeOldPass" type="password" placeholder="修改新密码时必填，用于验证身份"></div>
     <div class="form-row"><label>邮箱</label><input id="aeMail" value="${esc(email)}"></div>
-    <div class="form-row"><label>状态</label><select id="aeSt"><option value="1">启用</option><option value="0">禁用</option></select></div>`,
+    ${selfOnly ? "" : `<div class="form-row"><label>状态</label><select id="aeSt"><option value="1">启用</option><option value="0">禁用</option></select></div>`}`,
     async () => {
       const np = fv("aePass"), op = fv("aeOldPass");
       if (np && !op) throw new Error("修改密码需要先填写旧密码验证身份");
-      const r = await api("/admin/update", { body: { id, username: fv("aeName"), password: np,
-        old_password: op, email: fv("aeMail"), status: +fv("aeSt") } });
+      const body = { id, password: np, old_password: op, email: fv("aeMail") };
+      if (!selfOnly) { body.username = fv("aeName"); body.status = +fv("aeSt"); }
+      const r = await api("/admin/update", { body });
       if (r.code !== 1) throw new Error(r.msg);
       toast("已更新"); enter("admins");
     });
-  document.getElementById("aeSt").value = String(status);
+  if (!selfOnly) document.getElementById("aeSt").value = String(status);
 }
 function adminDel(id, name) {
   confirmModal("删除管理员", `将删除管理员 <b>${esc(name)}</b>，删除后无法用该账号登录。确定？`, async () => {
     const r = await api("/admin/delUser", { body: { id } });
     toast(r.msg, r.code === 1); enter("admins");
+  });
+}
+
+/* ================= 管理员会话管理 ================= */
+async function renderAdminSessions() {
+  const el = document.getElementById("sessTable");
+  if (!el) return;
+  const d = await api("/admin/sessions");
+  if (d.code !== 1) { el.innerHTML = errBox(d.msg); return; }
+  const list = (d.data && d.data.list) || [];
+  const curJti = (token || "").split("|")[2] || "";
+  const rows = list.map(s => {
+    const own = !!curJti && s.jti === curJti;
+    return `<tr>
+      <td>${esc(s.username || "-")}</td>
+      <td class="muted" style="font-family:monospace;font-size:12px">${esc(String(s.jti || "").slice(0, 12))}…${own ? ' <span class="badge blue">当前</span>' : ""}</td>
+      <td>${esc(s.ip || "-")}</td>
+      <td class="muted" style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(s.user_agent || "")}">${esc(s.user_agent || "-")}</td>
+      <td class="muted">${fmtTime(s.created_at)}</td>
+      <td class="muted">${fmtTime(s.last_seen)}</td>
+      <td>${s.revoked ? '<span class="badge off">已吊销</span>' : '<span class="badge ok">有效</span>'}</td>
+      <td class="inline" style="flex-wrap:nowrap">${s.revoked ? "-" : `<a href="javascript:;" class="lk r" onclick="sessionRevoke('${jsq(s.jti)}')">踢出</a>`}</td></tr>`;
+  }).join("");
+  el.innerHTML = list.length ? `<table><tr><th>管理员</th><th>会话标识</th><th>IP</th><th>User-Agent</th><th>登录时间</th><th>最后活跃</th><th>状态</th><th>操作</th></tr>${rows}</table>`
+    : `<p class="muted" style="text-align:center;padding:30px 0">暂无会话记录</p>`;
+}
+function sessionRevoke(jti) {
+  confirmModal("踢出会话", `将吊销该会话（<b>${esc(String(jti).slice(0, 12))}…</b>），对应设备需重新登录。若踢出的是当前会话，你自己也会被登出。确定？`, async () => {
+    const r = await api("/admin/session/revoke", { method: "POST", body: { jti } });
+    toast(r.msg || (r.code === 1 ? "会话已吊销" : "操作失败"), r.code === 1);
+    if (r.code === 1 && jti === (token || "").split("|")[2]) return logout(true);
+    await renderAdminSessions();
+  });
+}
+function sessionRevokeAll() {
+  confirmModal("踢出我全部设备", `<b style="color:#f56c6c">⚠ 此操作会吊销当前账号的全部会话，包含你自己正在使用的会话，操作后你会立即被登出并需要重新登录。</b><br><br>其他管理员的会话不受影响。确定继续？`, async () => {
+    const r = await api("/admin/session/revokeAll", { method: "POST", body: {} });
+    toast(r.msg || "已吊销全部会话", r.code === 1);
+    if (r.code === 1) return logout(true);
   });
 }
 
@@ -2280,10 +2383,11 @@ async function pageFW(main) {
     <div id="fwTable">${loading}</div></div>`;
   const d = await api("/fw/getPortRuleList");
   const rows = (d.data.list || []).map(x => `<tr><td>${x.id}</td><td><b>${x.port}</b></td><td>${esc(x.proto)}</td>
-    <td>${badge(x.action === "ACCEPT", x.action, x.action)}</td><td>${esc(x.source)}</td><td>${esc(x.note || "-")}</td></tr>`).join("");
+    <td>${badge(x.action === "ACCEPT", x.action, x.action)}</td><td>${esc(x.source)}</td><td>${esc(x.note || "-")}</td>
+    <td class="inline" style="flex-wrap:nowrap"><a href="javascript:;" class="lk r" onclick="fwDel(${x.id},${Number(x.port) || 0},'${jsq(x.proto)}')">删除</a></td></tr>`).join("");
   document.getElementById("fwTable").innerHTML = `
     <p class="muted" style="margin-bottom:10px">出站网卡：<b>${esc(d.data.out_iface)}</b>，出口 IP：<b>${esc(d.data.out_ip)}</b>（VPN 流量 SNAT 伪装随实例自动配置）</p>
-    <table><tr><th>ID</th><th>端口</th><th>协议</th><th>动作</th><th>来源</th><th>备注</th></tr>${rows}</table>`;
+    <table><tr><th>ID</th><th>端口</th><th>协议</th><th>动作</th><th>来源</th><th>备注</th><th>操作</th></tr>${rows}</table>`;
 }
 function fwAddModal() {
   formModal("添加防火墙规则", `
@@ -2295,6 +2399,14 @@ function fwAddModal() {
     const r = await api("/fw/addPortRule", { body: { port: +fv("fwPort"), proto: fv("fwProto"),
       action: fv("fwAct"), source: fv("fwSrc"), note: fv("fwNote") } });
     if (r.code !== 1) throw new Error(r.msg); toast("规则已生效"); enter("fw");
+  });
+}
+
+function fwDel(id, port, proto) {
+  confirmModal("删除防火墙规则", `将删除规则 <b>#${esc(String(id))} ${esc(String(port))}/${esc(proto)}</b>，同时撤销对应的 iptables 规则，操作不可恢复。确定？`, async () => {
+    const r = await api("/system/delPortRule", { method: "POST", body: { id } });
+    toast(r.msg || (r.code === 1 ? "规则已删除" : "删除失败"), r.code === 1);
+    if (r.code === 1) enter("fw");
   });
 }
 
@@ -2333,7 +2445,17 @@ async function pageSysLog(main) {
   main.innerHTML = `<div class="card">
     <div class="topbar"><h3 style="margin:0">📄 系统操作日志</h3>
       <button class="ghost" onclick="enter('syslog')">⟳ 刷新</button></div>
-    <div id="sysLogBox">${loading}</div></div>`;
+    <div class="topbar" style="flex-wrap:wrap">
+      <div class="inline" style="flex-wrap:wrap;gap:8px">
+        <select id="slFmt"><option value="csv">CSV</option><option value="json">JSON</option></select>
+        <input type="date" id="slStart" title="开始日期（留空不限）">
+        <input type="date" id="slEnd" title="结束日期（留空不限）">
+        <input id="slAction" placeholder="动作过滤（留空全部）" style="width:180px">
+        <button class="primary" onclick="syslogExport()">⬇ 导出</button>
+      </div></div>
+    <div id="sysLogBox">${loading}</div></div>
+  <div class="card" style="margin-top:16px"><h3>📊 近 30 天操作分布</h3>
+    <div id="sysLogStats">${loading}</div></div>`;
   const d = await api("/syslog/list");
   const rows = (d.data.list || []).map(e => `<tr>
     <td>${esc(e.admin)}</td><td><span class="badge blue">${esc(e.action)}</span></td>
@@ -2342,6 +2464,55 @@ async function pageSysLog(main) {
   document.getElementById("sysLogBox").innerHTML = rows ? `<table>
     <tr><th>账户/邮箱</th><th>类型</th><th>详情</th><th>IP</th><th>操作记录日期时间</th></tr>${rows}</table>`
     : `<p class="muted" style="text-align:center;padding:30px 0">暂无日志</p>`;
+  await renderSyslogStats();
+}
+
+/* ================= 日志导出与聚合统计 ================= */
+async function syslogExport() {
+  const fmt = fv("slFmt") === "json" ? "json" : "csv";
+  const body = { format: fmt, start: fv("slStart"), end: fv("slEnd"), action: fv("slAction") };
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = "Bearer " + token;
+  let res;
+  try {
+    res = await fetch(API_BASE + "/syslog/export", { method: "POST", headers, credentials: "include", body: JSON.stringify(body) });
+  } catch (e) { return toast("导出失败：" + e.message, false); }
+  const cd = res.headers.get("content-disposition") || "";
+  if (!res.ok || cd.toLowerCase().indexOf("attachment") < 0) {
+    let msg = "导出失败（HTTP " + res.status + "）";
+    try { const j = await res.json(); if (j && j.msg) msg = j.msg; } catch (e) { /* 非 JSON 响应 */ }
+    return toast(msg, false);
+  }
+  const blob = await res.blob();
+  const m = cd.match(/filename="?([^";]+)"?/i);
+  const name = m ? m[1] : ("syslog_" + Date.now() + "." + fmt);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast("日志已导出");
+}
+async function renderSyslogStats() {
+  const box = document.getElementById("sysLogStats");
+  if (!box) return;
+  const d = await api("/syslog/stats");
+  if (d.code !== 1) { box.innerHTML = errBox(d.msg); return; }
+  const list = (d.data && d.data.list) || [];
+  const days = (d.data && d.data.days) || 30;
+  if (!list.length) { box.innerHTML = `<p class="muted" style="padding:10px 0">近 ${days} 天暂无操作记录</p>`; return; }
+  const max = Math.max.apply(null, list.map(x => Number(x.count) || 0)) || 1;
+  box.innerHTML = `<div class="muted" style="font-size:12px;margin-bottom:10px">统计范围：近 ${days} 天 · 共 ${list.length} 类操作</div>` +
+    list.map(x => {
+      const n = Number(x.count) || 0;
+      const pct = Math.max(2, Math.round(n / max * 100));
+      return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        <span style="width:190px;text-align:right;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(x.action)}">${esc(x.action)}</span>
+        <span style="flex:1;background:var(--border,#eef1f4);height:14px;border-radius:7px;overflow:hidden"><i style="display:block;width:${pct}%;height:14px;background:var(--primary);border-radius:7px"></i></span>
+        <b style="width:50px">${n}</b></div>`;
+    }).join("");
 }
 
 /* ================= 版本与在线升级 ================= */
@@ -2480,6 +2651,298 @@ function upgradeBackupDelete(a) {
     toast(r.msg, r.code === 1);
     await upgradeStatus();
   });
+}
+
+/* ================= 健康状态（裸路径 /health，免鉴权） ================= */
+const HEALTH_LEVELS = {
+  pass: ["正常", "ok", "#67c23a"],
+  warn: ["警告", "warn", "#e6a23c"],
+  fail: ["异常", "off", "#f56c6c"],
+  skip: ["跳过", "gray", "#909399"]
+};
+async function fetchHealth() {
+  const res = await fetch("/health", { credentials: "omit", cache: "no-store" });
+  if (!res.ok) throw new Error("健康接口请求失败（HTTP " + res.status + "）");
+  return await res.json();
+}
+async function pageHealth(main) {
+  main.innerHTML = `<div class="card">
+    <div class="topbar"><h3 style="margin:0">💚 健康状态</h3>
+      <div class="inline">
+        <button class="primary" onclick="healthPrecheck()">▶ 运行预检</button>
+        <button class="ghost" onclick="copyScrapeURL()">⧉ 复制抓取地址</button>
+        <button class="ghost" onclick="enter('health')">⟳ 刷新</button>
+      </div></div>
+    <div id="healthSummary">${loading}</div>
+    <div id="healthChecks">${loading}</div></div>`;
+  await renderHealthData();
+}
+async function renderHealthData() {
+  const sumBox = document.getElementById("healthSummary");
+  const chkBox = document.getElementById("healthChecks");
+  if (!sumBox || !chkBox) return;
+  let d;
+  try { d = await fetchHealth(); }
+  catch (e) { sumBox.innerHTML = errBox(e.message); chkBox.innerHTML = ""; return; }
+  const statusMap = { ok: ["运行正常", "ok"], degraded: ["降级运行", "warn"], error: ["存在异常", "off"] };
+  const st = statusMap[d.status] || ["未知状态", "gray"];
+  const days = d.cert_days || {};
+  const disk = d.disk_percent;
+  sumBox.innerHTML = `<div class="inline" style="gap:26px;flex-wrap:wrap;align-items:flex-start">
+      <div><div class="muted">总体状态</div><div style="font-size:20px;font-weight:700"><span class="badge ${st[1]}">${st[0]}</span></div></div>
+      <div><div class="muted">版本</div><b>${esc(d.version || "-")}</b></div>
+      <div><div class="muted">运行时长</div><b>${esc(d.uptime || "-")}</b></div>
+      <div><div class="muted">实例数</div><b>${esc(String(d.instances ?? "-"))}</b></div>
+      <div><div class="muted">在线用户</div><b>${esc(String(d.online ?? "-"))}</b></div>
+      <div><div class="muted">CA 证书剩余</div><b style="color:${Number(days.ca) <= 30 ? "#f56c6c" : "inherit"}">${esc(String(days.ca ?? "-"))} 天</b></div>
+      <div><div class="muted">服务器证书剩余</div><b style="color:${Number(days.server) <= 30 ? "#f56c6c" : "inherit"}">${esc(String(days.server ?? "-"))} 天</b></div>
+      <div><div class="muted">磁盘占用</div><b style="color:${Number(disk) >= 85 ? "#f56c6c" : "inherit"}">${esc(String(disk ?? "-"))}${disk === undefined || disk === null ? "" : "%"}</b></div>
+    </div>
+    <div class="muted" style="font-size:12px;margin-top:10px">ⓘ Prometheus 抓取地址：<code>${esc(location.origin + "/metrics")}</code>（裸路径，可免鉴权抓取）</div>`;
+  renderHealthChecks(d.checks || []);
+}
+function renderHealthChecks(checks) {
+  const box = document.getElementById("healthChecks");
+  if (!box) return;
+  if (!checks.length) { box.innerHTML = `<p class="muted" style="padding:16px 0">暂无检查项</p>`; return; }
+  box.innerHTML = `<h3 style="margin-top:18px">🔍 检查项（${checks.length}）</h3>` + checks.map(c => {
+    const lv = HEALTH_LEVELS[c.level] || [esc(c.level || "未知"), "gray", "#909399"];
+    return `<div style="border-left:4px solid ${lv[2]};background:var(--border,#f7f8fa);border-radius:4px;padding:10px 12px;margin-bottom:8px">
+      <div class="inline" style="gap:10px"><span class="badge ${lv[1]}">${lv[0]}</span><b>${esc(c.name || c.id || "-")}</b></div>
+      <div style="font-size:13px;line-height:1.7;margin-top:4px">${esc(c.message || "-")}</div>
+      ${c.fix ? `<div class="muted" style="font-size:12px;line-height:1.7;margin-top:4px">🛠 修复建议：${esc(c.fix)}</div>` : ""}
+    </div>`;
+  }).join("");
+}
+async function healthPrecheck() {
+  const box = document.getElementById("healthChecks");
+  if (box) box.innerHTML = loading;
+  try {
+    const d = await fetchHealth();
+    renderHealthChecks(d.checks || []);
+    toast("预检完成，共 " + (d.checks || []).length + " 项检查");
+  } catch (e) { if (box) box.innerHTML = errBox(e.message); toast("预检失败", false); }
+}
+function copyScrapeURL() {
+  const url = location.origin + "/metrics";
+  if (navigator.clipboard) navigator.clipboard.writeText(url).then(() => toast("抓取地址已复制：" + url), () => prompt("请手动复制抓取地址：", url));
+  else prompt("请手动复制抓取地址：", url);
+}
+
+/* ================= 告警设置 ================= */
+const ALERT_CHANNEL_TYPES = [["email", "邮件"], ["feishu", "飞书"], ["wecom", "企业微信"], ["dingtalk", "钉钉"], ["webhook", "通用 Webhook"]];
+async function pageAlert(main) {
+  main.innerHTML = `<div class="card">
+    <div class="topbar"><h3 style="margin:0">🔔 告警设置</h3>
+      <button class="ghost" onclick="enter('alert')">⟳ 刷新</button></div>
+    <div id="alertCfgBox">${loading}</div></div>
+  <div class="card" style="margin-top:16px"><h3>📤 发送测试通知</h3>
+    <button class="primary" onclick="alertTest()">发送测试通知</button>
+    <div id="alertTestBox" class="muted" style="margin-top:10px">测试通知会发往下方所有已配置渠道（不受「启用告警」开关影响）。</div></div>
+  <div class="card wide" style="margin-top:16px"><h3>🕘 最近告警历史（50 条）</h3>
+    <div id="alertHistoryBox">${loading}</div></div>`;
+  await Promise.all([renderAlertConfig(), renderAlertHistory()]);
+}
+async function renderAlertConfig() {
+  const box = document.getElementById("alertCfgBox");
+  if (!box) return;
+  const d = await api("/alert/config");
+  if (d.code !== 1) { box.innerHTML = errBox(d.msg); return; }
+  const c = d.data || {};
+  const channels = Array.isArray(c.channels) ? c.channels : [];
+  box.innerHTML = `
+    <div class="form-row"><label>启用告警</label><select id="alEnabled" style="max-width:180px">
+      <option value="1" ${c.enabled ? "selected" : ""}>开启</option>
+      <option value="0" ${!c.enabled ? "selected" : ""}>关闭</option></select></div>
+    <div class="tip-banner">ⓘ Webhook 渠道仅支持 HTTPS，且不允许指向内网地址；<b>已保存的 Webhook URL 在此打码显示</b>。若某渠道地址未做改动，保存前需重新填写完整 URL（不会把打码串写回配置）。</div>
+    <div id="alChannels">${channels.map(ch => alertChannelRow(ch)).join("")}</div>
+    <div class="form-row"><label></label>
+      <div class="inline"><button class="ghost" onclick="alertAddChannel()">＋ 添加渠道</button>
+      <button class="primary" onclick="alertSave()">✓ 保存配置</button></div></div>`;
+}
+function alertInputHTML(type, ch) {
+  return type === "email"
+    ? `<input data-al-email value="${esc(ch.email || "")}" placeholder="收件邮箱" style="width:100%">`
+    : `<input data-al-url value="${esc(ch.url || "")}" placeholder="https:// 开头的 Webhook 地址" style="width:100%">`;
+}
+function alertChannelRow(ch) {
+  const t = ch.type || "webhook";
+  return `<div class="alert-channel" style="border:1px solid var(--border,#ebeef5);border-radius:6px;padding:10px;margin-bottom:10px">
+    <div class="inline" style="gap:10px;flex-wrap:wrap">
+      <select data-al-type style="max-width:160px" onchange="alertTypeChange(this)">
+        ${ALERT_CHANNEL_TYPES.map(([v, n]) => `<option value="${v}" ${v === t ? "selected" : ""}>${n}</option>`).join("")}
+      </select>
+      <span class="al-input-wrap" style="flex:1;min-width:220px">${alertInputHTML(t, ch)}</span>
+      <a href="javascript:;" class="lk r" onclick="alertRemoveChannel(this)">删除</a>
+    </div></div>`;
+}
+function alertTypeChange(sel) {
+  const row = sel.closest(".alert-channel");
+  const wrap = row && row.querySelector(".al-input-wrap");
+  if (wrap) wrap.innerHTML = alertInputHTML(sel.value, {});
+}
+function alertAddChannel() {
+  const box = document.getElementById("alChannels");
+  if (box) box.insertAdjacentHTML("beforeend", alertChannelRow({ type: "webhook", url: "" }));
+}
+function alertRemoveChannel(a) {
+  const row = a.closest(".alert-channel");
+  if (row) row.remove();
+}
+function alertCollect() {
+  return [...document.querySelectorAll("#alChannels .alert-channel")].map(row => {
+    const type = row.querySelector("[data-al-type]").value;
+    const input = row.querySelector("[data-al-email],[data-al-url]");
+    const val = ((input && input.value) || "").trim();
+    return type === "email" ? { type, email: val } : { type, url: val };
+  });
+}
+async function alertSave() {
+  const channels = alertCollect();
+  if (!channels.length) return toast("请至少配置一个渠道", false);
+  // 后端 GET 会把 URL 的 path 打码成 /***，打码串不能回写，否则会覆盖真实地址
+  if (channels.some(c => c.type !== "email" && (c.url || "").indexOf("***") >= 0)) {
+    return toast("检测到未修改的已打码 Webhook 地址，请重新填写完整 URL 后再保存", false);
+  }
+  const r = await api("/alert/config", { method: "POST", body: { enabled: fv("alEnabled") === "1", channels } });
+  if (r.code !== 1) return toast(r.msg || "保存失败", false);
+  toast("告警配置已保存");
+  await renderAlertConfig();
+}
+async function alertTest() {
+  const box = document.getElementById("alertTestBox");
+  if (!box) return;
+  box.innerHTML = loading;
+  try {
+    const r = await api("/alert/test", { method: "POST", body: {} });
+    if (r.code !== 1) { box.innerHTML = errBox(r.msg); return; }
+    const results = Array.isArray(r.data) ? r.data : [];
+    box.innerHTML = results.length
+      ? `<table><tr><th>渠道</th><th>目标</th><th>结果</th><th>说明</th></tr>${results.map(x => `<tr>
+          <td>${esc(x.type)}</td><td>${esc(x.target || "-")}</td>
+          <td>${x.ok ? '<span class="badge ok">成功</span>' : '<span class="badge off">失败</span>'}</td>
+          <td>${esc(x.error || "-")}</td></tr>`).join("")}</table>`
+      : `<div class="tip-banner">未配置任何渠道，没有发送测试通知。</div>`;
+    toast("测试已完成");
+    await renderAlertHistory();
+  } catch (e) { box.innerHTML = errBox(e.message); }
+}
+async function renderAlertHistory() {
+  const box = document.getElementById("alertHistoryBox");
+  if (!box) return;
+  const d = await api("/alert/history");
+  if (d.code !== 1) { box.innerHTML = errBox(d.msg); return; }
+  const list = Array.isArray(d.data) ? d.data : [];
+  box.innerHTML = list.length ? `<table><tr><th>时间</th><th>规则</th><th>级别</th><th>标题</th><th>内容</th><th>发送结果</th></tr>
+    ${list.map(x => `<tr><td class="muted">${esc(x.time)}</td><td>${esc(x.rule)}</td><td>${esc(x.level)}</td>
+      <td>${esc(x.title)}</td><td>${esc(x.message)}</td><td>${esc(x.result)}</td></tr>`).join("")}</table>`
+    : `<p class="muted" style="text-align:center;padding:30px 0">暂无告警记录</p>`;
+}
+
+/* ================= 安全设置（管理员 MFA） ================= */
+function copyText(text, label) {
+  if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => toast(label + "已复制"), () => prompt("请手动复制" + label + "：", text));
+  else prompt("请手动复制" + label + "：", text);
+}
+async function pageSecurity(main) {
+  main.innerHTML = `<div class="card" style="max-width:960px">
+    <div class="topbar"><h3 style="margin:0">🔐 安全设置 · 双因子认证（MFA）</h3>
+      <button class="ghost" onclick="enter('security')">⟳ 刷新</button></div>
+    <div id="mfaStatusBox">${loading}</div></div>`;
+  await renderMfaStatus();
+}
+async function renderMfaStatus() {
+  const box = document.getElementById("mfaStatusBox");
+  if (!box) return;
+  const d = await api("/admin/mfa/status");
+  if (d.code !== 1) { box.innerHTML = errBox(d.msg); return; }
+  const s = d.data || {};
+  box.innerHTML = `
+    <div class="tip-banner">ⓘ 开启后，登录需在密码之后输入验证器 App 的 6 位动态码；动态码丢失可用一次性恢复码登录。已启用状态下密钥不再回显。</div>
+    <div class="inline" style="gap:22px;margin:14px 0">
+      <div><div class="muted">MFA 状态</div><b>${s.enabled ? '<span class="badge ok">已启用</span>' : '<span class="badge off">未启用</span>'}</b></div>
+      <div><div class="muted">密钥</div><b>${s.secret_set ? '<span class="badge blue">已设置</span>' : '<span class="badge gray">未设置</span>'}</b></div>
+    </div>
+    ${s.enabled
+      ? `<div class="inline" style="gap:10px">
+          <button class="orange" onclick="mfaDisableModal()">关闭 MFA</button>
+          <button class="ghost" onclick="mfaRecoveryModal()">重置恢复码</button>
+        </div>
+        <p class="muted" style="font-size:12px;margin-top:10px">关闭 MFA 与重置恢复码均需当前密码 + 动态码双重验证。</p>`
+      : `<button class="primary" onclick="mfaSetup()">🔑 生成密钥并启用</button>
+        <div id="mfaSetupBox" style="margin-top:14px"></div>`}`;
+}
+async function mfaSetup() {
+  const box = document.getElementById("mfaSetupBox");
+  if (box) box.innerHTML = loading;
+  try {
+    const d = await api("/admin/mfa/setup", { method: "POST", body: {} });
+    if (d.code !== 1) {
+      if (box) box.innerHTML = errBox(d.msg);
+      return toast(d.msg || "获取密钥失败", false);
+    }
+    const url = (d.data && d.data.otpauth_url) || "";
+    let secret = "";
+    try { secret = new URL(url).searchParams.get("secret") || ""; } catch (e) { secret = ""; }
+    if (!secret) { const m = url.match(/[?&]secret=([^&]+)/); if (m) secret = decodeURIComponent(m[1]); }
+    if (!box) return;
+    box.innerHTML = `<div style="border:1px solid var(--border,#ebeef5);border-radius:6px;padding:12px">
+      <div class="tip-banner">ⓘ 请用验证器 App（Google Authenticator / Microsoft Authenticator / 1Password 等）<b>手动输入下方密钥</b>添加账号；也可复制完整 otpauth 链接导入支持该格式的验证器。<b>本页不加载任何外部二维码服务。</b></div>
+      <div class="form-row"><label>密钥（Base32）</label>
+        <div class="inline" style="flex:1"><input id="mfSecret" readonly value="${esc(secret)}" style="flex:1;font-family:monospace">
+          <button class="ghost" onclick="copyText(fv('mfSecret'),'密钥')">复制</button></div></div>
+      <div class="form-row"><label>otpauth 链接</label>
+        <div class="inline" style="flex:1"><input id="mfUri" readonly value="${esc(url)}" style="flex:1">
+          <button class="ghost" onclick="copyText(fv('mfUri'),'配置链接')">复制</button></div></div>
+      <div class="form-row"><label>账户名</label><div class="muted">${esc(meName || "当前管理员")}</div></div>
+      <div class="form-row"><label class="req">动态码</label><input id="mfOtp" inputmode="numeric" maxlength="6" placeholder="输入验证器显示的 6 位动态码以确认启用"></div>
+      <div class="form-row"><label></label><button class="primary" onclick="mfaEnable()">✓ 确认启用</button></div>
+      <div class="muted" style="font-size:12px">本次密钥仅在设置流程中临时有效（10 分钟），未启用前不会写入配置。</div>
+    </div>`;
+  } catch (e) { if (box) box.innerHTML = errBox(e.message); }
+}
+async function mfaEnable() {
+  const otp = (fv("mfOtp") || "").trim();
+  if (!/^[0-9]{6}$/.test(otp)) return toast("请输入 6 位动态码", false);
+  const r = await api("/admin/mfa/enable", { method: "POST", body: { otp } });
+  if (r.code !== 1) return toast(r.msg || "启用失败", false);
+  showRecoveryCodes((r.data && r.data.recovery_codes) || [], "MFA 已启用");
+}
+function showRecoveryCodes(codes, title) {
+  const list = Array.isArray(codes) ? codes : [];
+  closeModal("mRecovery");
+  const all = list.join(String.fromCharCode(10));
+  $app.insertAdjacentHTML("beforeend", `<div class="modal-mask" id="mRecovery"><div class="modal" style="width:560px;border-top:5px solid #f56c6c">
+    <h3 style="color:#f56c6c">⚠ ${esc(title)} · 一次性恢复码</h3>
+    <div class="err-box" style="line-height:1.8"><b>这是唯一一次显示恢复码，关闭后无法再次查看！</b><br>请立即复制并离线保存（密码管理器或打印）。验证器丢失时可用恢复码登录，每个恢复码仅能使用一次。</div>
+    <div style="background:var(--border,#f5f7fa);border-radius:6px;padding:10px;margin:12px 0;font-family:monospace;font-size:15px;line-height:2;word-break:break-all">${list.map(x => `<div>${esc(x)}</div>`).join("")}</div>
+    <div class="inline" style="gap:10px"><button class="ghost" onclick="copyText(${jsq(all)},'恢复码')">⧉ 复制全部</button>
+    <button class="primary" onclick="closeModal('mRecovery');enter('security')">我已安全保存</button></div>
+  </div></div>`);
+}
+function mfaDisableModal() {
+  formModal("关闭 MFA", `
+    <div class="tip-banner">⚠ 关闭后管理员仅需密码即可登录，安全性降低。需验证当前密码与动态码。</div>
+    <div class="form-row"><label class="req">当前密码</label><input id="mdPass" type="password" autocomplete="current-password"></div>
+    <div class="form-row"><label class="req">动态码</label><input id="mdOtp" inputmode="numeric" maxlength="6"></div>`,
+    async () => {
+      const r = await api("/admin/mfa/disable", { method: "POST", body: { password: fv("mdPass"), otp: fv("mdOtp") } });
+      if (r.code !== 1) throw new Error(r.msg || "关闭失败");
+      toast("MFA 已关闭");
+      enter("security");
+    });
+}
+function mfaRecoveryModal() {
+  formModal("重置恢复码", `
+    <div class="tip-banner">⚠ 重置后<b>旧恢复码立即全部作废</b>，请保存新生成的恢复码。需验证当前密码与动态码。</div>
+    <div class="form-row"><label class="req">当前密码</label><input id="mrPass" type="password" autocomplete="current-password"></div>
+    <div class="form-row"><label class="req">动态码</label><input id="mrOtp" inputmode="numeric" maxlength="6"></div>`,
+    async () => {
+      const r = await api("/admin/mfa/recovery", { method: "POST", body: { password: fv("mrPass"), otp: fv("mrOtp") } });
+      if (r.code !== 1) throw new Error(r.msg || "重置失败");
+      toast("恢复码已重置");
+      showRecoveryCodes((r.data && r.data.recovery_codes) || [], "新恢复码");
+    });
 }
 
 /* ================= 启动 ================= */

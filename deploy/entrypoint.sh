@@ -3,6 +3,11 @@ set -e
 
 echo ">>> SSLVPN-Go 启动中..."
 
+# 0. 运行期敏感文件默认权限（P2-4）：本脚本拉起的 openvpn 实例会创建
+#    mgmt.sock / status.log / ipp.txt / vpn.pid / online_users 等文件，
+#    umask 077 使其全部为 0600/0700（仅容器内 root 可见）。
+umask 077
+
 # 1. tun 设备（容器内通常由 compose 挂载，兜底创建）
 if [ ! -c /dev/net/tun ]; then
     mkdir -p /dev/net
@@ -15,6 +20,11 @@ sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 
 # 3. 初始化（建库/管理员/PKI/钩子，幂等）
 sslvpn init
+
+# 3.1 online_users 含用户名与隧道 IP，历史部署可能是 0644，显式收紧（P2-4）
+mkdir -p /var/lib/sslvpn/auth
+touch /var/lib/sslvpn/auth/online_users 2>/dev/null || true
+chmod 600 /var/lib/sslvpn/auth/online_users 2>/dev/null || true
 
 # 4. 拉起此前运行中的实例
 #    设计原则：单个实例启动失败只告警，不阻断 Web 管理界面（否则配置写坏就再也进不去了）

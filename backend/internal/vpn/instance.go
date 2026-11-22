@@ -180,7 +180,8 @@ func StartInstance(s *Service) error {
 	// 服务端证书私钥有口令，openvpn askpass 从文件读
 	cmd := exec.Command(BinOpenVPN, "--config", filepath.Join(instanceDir(s.Name), "server.conf"))
 	logPath := filepath.Join(instanceDir(s.Name), "stdout.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	// 0600：实例日志含连接用户/IP 等敏感信息（P2-4）
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
