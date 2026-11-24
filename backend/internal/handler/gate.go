@@ -17,6 +17,7 @@ var featureLabel = map[string]string{
 	license.FeatMultiInstance:   "多实例 / 集群部署",
 	license.FeatPrivateIssuance: "私有化许可签发与在线登记",
 	license.FeatACMERenew:       "证书自动续签",
+	license.FeatMCPWrite:        "MCP 写工具（AI 踢人/启停/升级）",
 }
 
 // tierLabel 档位中文名

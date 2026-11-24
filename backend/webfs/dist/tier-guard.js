@@ -17,7 +17,8 @@
     client_download:  { label: "客户端分发与下载管控", tier: "专业版" },
     multi_instance:   { label: "新增实例 / 集群部署",  tier: "企业版" },
     private_issuance: { label: "私有化签发与在线登记", tier: "企业版" },
-    acme_auto_renew:  { label: "证书自动续签",         tier: "企业版" }
+    acme_auto_renew:  { label: "证书自动续签",         tier: "企业版" },
+    mcp_write:        { label: "MCP 写工具（AI 执行踢人/启停/升级）", tier: "专业版" }
   };
   var allowed = null; // null=未知（不隐藏）；否则为 {featureKey:true} 映射
 
@@ -33,13 +34,17 @@
   // 供 app.js 调用：把某个面板替换成统一的「未授权」提示
   window.tierLockBox = function (key, title) {
     var m = FEATURE_META[key] || { label: "该功能", tier: "更高档位" };
+    // MCP 写工具与其它高级功能的拦截提示不同：档位不足时不返回 403，而是禁止创建 write Token。
+    var enforcement = key === "mcp_write"
+      ? '服务端已硬拦截：当前档位无法创建 write Token，MCP 只开放 21 个只读工具。'
+      : '服务端已对该功能做硬拦截，未授权调用会返回 403。';
     return '<div class="tier-lock-box"><div class="topbar">' +
       '<h3 style="margin:0">🔒 ' + (title || m.label) + '</h3>' +
       '<span class="badge off">' + m.tier + '功能</span></div>' +
       '<div class="tip-banner" style="margin-top:10px">' +
       'ⓘ <b>' + m.label + '</b>属于' + m.tier + '功能，当前授权档位未开启。' +
       '可在「许可管理」查看当前档位；如需启用，请联系作者获取授权（详见文档站「捐赠与支持」）。' +
-      '服务端已对该功能做硬拦截，未授权调用会返回 403。</div></div>';
+      enforcement + '</div></div>';
   };
 
   function refresh() {

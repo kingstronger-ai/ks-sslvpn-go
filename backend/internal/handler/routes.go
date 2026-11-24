@@ -72,6 +72,9 @@ func init() {
 	reg("POST", "/account/batchUpload", true, AccountBatchUpload)
 	reg("POST", "/account/batchDelete", true, AccountBatchDelete)
 	reg("POST", "/account/batchSetExpire", true, AccountBatchSetExpire)
+	// 按勾选用户批量重建证书 / 下发配置邮件（POST，带审计；上限 100）
+	reg("POST", "/account/batchRebuild", true, AccountBatchRebuild)
+	reg("POST", "/account/batchSendMailSelected", true, AccountBatchSendMailSelected)
 	reg("GET", "/account/startThinkPHPQueue", true, StartQueue)
 	reg("POST", "/account/downloadUserCfg", true, DownloadUserCfg)
 	reg("POST", "/account/rebuild", true, RebuildUserCfg)
@@ -114,6 +117,12 @@ func init() {
 	reg("POST", "/admin/mfa/enable", true, AdminMFAEnable)
 	reg("POST", "/admin/mfa/disable", true, AdminMFADisable)
 	reg("POST", "/admin/mfa/recovery", true, AdminMFARecovery)
+
+	// ---- API Token 管理（auth=true：仅现有 session 认证可调用，禁止 token 自我提权）----
+	reg("GET", "/apitoken/list", true, APITokenList)
+	reg("POST", "/apitoken/create", true, APITokenCreate)
+	reg("POST", "/apitoken/revoke", true, APITokenRevoke)
+	reg("POST", "/apitoken/test", true, APITokenTest)
 
 	// ---- 系统设置 ----
 	reg("POST", "/system/updateLogin", true, SysUpdateLogin)
@@ -243,6 +252,9 @@ func init() {
 	regF("GET", "/ldap/synchronization", true, license.FeatLDAP, LdapSync)
 	regF("POST", "/ldap/import", true, license.FeatLDAP, LdapImport)
 	regF("POST", "/ldap/update", true, license.FeatLDAP, LdapUpdate)
+	// LDAP 账号状态对比：预览差异 + 快照确认后单向禁用（专业版功能）
+	regF("GET", "/ldap/statusCheck", true, license.FeatLDAP, LdapStatusCheck)
+	regF("POST", "/ldap/statusApply", true, license.FeatLDAP, LdapStatusApply)
 	reg("GET", "/license/accept", true, LicenseAccept)
 
 	// ---- 扫码登录（公开：客户端与浏览器直接访问，内部各自校验）—— 专业版功能 ----

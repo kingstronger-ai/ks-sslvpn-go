@@ -32,7 +32,7 @@ func TestTierDerivation(t *testing.T) {
 // TestTierFeatures 校验三档默认功能开闭：社区版不含高级功能，
 // 专业版含 Pro 组但不含企业组，企业版全开。
 func TestTierFeatures(t *testing.T) {
-	proOnly := []string{FeatDomainRoute, FeatSSO, FeatCCD, FeatLDAP, FeatClientDownload}
+	proOnly := []string{FeatDomainRoute, FeatSSO, FeatCCD, FeatLDAP, FeatClientDownload, FeatMCPWrite}
 	entOnly := []string{FeatMultiInstance, FeatPrivateIssuance, FeatACMERenew}
 	all := append(append([]string{}, proOnly...), entOnly...)
 

@@ -73,10 +73,74 @@ func scanAccounts(where string, args ...any) []Account {
 	return list
 }
 
+// AccountList GET /account/userlist
+// 支持筛选（username 关键字 / 状态 / 到期 / 分组 / 在线）与分页（page + size）。
+// 过滤条件尽量下推到 SQL；在线状态来自 management 内存在线表，只能在结果上过滤。
+// 分页仅当显式传 page 时启用：不传 page 的旧调用（仪表盘、编辑弹窗）仍返回全量，保持兼容。
 func AccountList(w http.ResponseWriter, r *http.Request) {
-	kw := strings.TrimSpace(r.URL.Query().Get("keyword"))
-	list := scanAccounts(`WHERE username LIKE '%'||?||'%'`, kw)
-	util.OK(w, map[string]any{"list": list, "total": len(list)})
+	q := r.URL.Query()
+	where := `WHERE 1=1`
+	args := []any{}
+	if kw := strings.TrimSpace(q.Get("keyword")); kw != "" {
+		where += ` AND (username LIKE '%'||?||'%' OR COALESCE(note,'') LIKE '%'||?||'%' OR auth_type LIKE '%'||?||'%' OR COALESCE(email,'') LIKE '%'||?||'%')`
+		args = append(args, kw, kw, kw, kw)
+	}
+	switch q.Get("status") {
+	case "1":
+		where += ` AND status=1`
+	case "0":
+		where += ` AND status=0`
+	}
+	if gid, err := strconv.ParseInt(q.Get("group_id"), 10, 64); err == nil && gid > 0 {
+		where += ` AND group_id=?`
+		args = append(args, gid)
+	}
+	switch q.Get("expire") {
+	case "permanent": // 永久（无到期日）
+		where += ` AND COALESCE(expire_date,'')=''`
+	case "dated": // 已设到期日
+		where += ` AND COALESCE(expire_date,'')<>''`
+	case "expired": // 已过期（与认证层口径一致：到期日 < 今天即过期）
+		where += ` AND COALESCE(expire_date,'')<>'' AND expire_date<?`
+		args = append(args, time.Now().Format("2006-01-02"))
+	}
+	list := scanAccounts(where, args...)
+	// 在线状态过滤（数据源为 management 内存在线表，无法下推 SQL）
+	if v := q.Get("online"); v == "1" || v == "0" {
+		out := make([]Account, 0, len(list))
+		want := v == "1"
+		for _, a := range list {
+			if (a.Online == 1) == want {
+				out = append(out, a)
+			}
+		}
+		list = out
+	}
+	total := len(list)
+	page, hasPage := 0, false
+	if s := q.Get("page"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			page, hasPage = n, true
+		}
+	}
+	if !hasPage {
+		util.OK(w, map[string]any{"list": list, "total": total})
+		return
+	}
+	size, _ := strconv.Atoi(q.Get("size"))
+	if size != 20 && size != 50 && size != 100 {
+		size = 20
+	}
+	start := (page - 1) * size
+	pageList := []Account{}
+	if start < total {
+		end := start + size
+		if end > total {
+			end = total
+		}
+		pageList = list[start:end]
+	}
+	util.OK(w, map[string]any{"list": pageList, "total": total, "page": page, "size": size})
 }
 
 // normalizeExpireDate 校验并规范化到期日期：空=永久；否则必须是 YYYY-MM-DD。
@@ -885,6 +949,99 @@ func BatchBuildUserFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	util.OK(w, map[string]int{"built": n, "total": len(list)})
+}
+
+// selectedAccounts 解析批量操作的 ids：去重、丢弃非法/不存在的 id，保持请求顺序。
+// max 限制单次数量（证书签发/邮件发送均为重操作，不宜过多）。
+func selectedAccounts(ids []int64, max int) ([]Account, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("请先勾选要操作的账号")
+	}
+	if len(ids) > max {
+		return nil, fmt.Errorf("单次最多操作 %d 个账号", max)
+	}
+	seen := map[int64]bool{}
+	out := make([]Account, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		list := scanAccounts(`WHERE id=?`, id)
+		if len(list) > 0 {
+			out = append(out, list[0])
+		}
+	}
+	return out, nil
+}
+
+// AccountBatchRebuild POST /account/batchRebuild
+// 按勾选账号批量重建证书：吊销旧证书、重新签发并重新生成客户端配置。
+// 重建后已在线的客户端需重新下载配置并连接（旧证书已吊销）。
+func AccountBatchRebuild(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := util.ReadJSON(r, &req); err != nil {
+		util.Fail(w, "参数错误")
+		return
+	}
+	list, err := selectedAccounts(req.IDs, 100)
+	if err != nil {
+		util.Fail(w, err.Error())
+		return
+	}
+	rebuilt, failed := 0, 0
+	for _, a := range list {
+		if !validName(a.Username) || !vpn.SafeConfigName(a.Username) {
+			failed++
+			continue
+		}
+		_ = vpn.RevokeUserCert(a.Username)
+		if vpn.IssueUserCert(a.Username) == nil {
+			rebuilt++
+		} else {
+			failed++
+		}
+	}
+	syslogFromRequest(r, "批量重建用户配置", fmt.Sprintf("目标=%d 成功=%d 失败=%d", len(list), rebuilt, failed))
+	util.OK(w, map[string]any{"total": len(list), "rebuilt": rebuilt, "failed": failed})
+}
+
+// AccountBatchSendMail POST /account/batchSendMailSelected
+// 按勾选账号批量下发配置邮件（正文按模板渲染，附件含该用户的客户端配置）。
+// 未绑定邮箱的账号计为跳过；SMTP 未配置时逐个发送会失败，前端会提示成功数。
+func AccountBatchSendMailSelected(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := util.ReadJSON(r, &req); err != nil {
+		util.Fail(w, "参数错误")
+		return
+	}
+	list, err := selectedAccounts(req.IDs, 100)
+	if err != nil {
+		util.Fail(w, err.Error())
+		return
+	}
+	cfg := loadSMTP()
+	sent, skipped, failed := 0, 0, 0
+	for i := range list {
+		a := &list[i]
+		if a.Email == "" {
+			skipped++
+			continue
+		}
+		subject, body := renderMailTemplate(a)
+		atts := accountMailAtts(a)
+		if mail.SendWithAttachments(cfg, a.Email, subject, body, atts) == nil {
+			sent++
+		} else {
+			failed++
+		}
+	}
+	syslogFromRequest(r, "批量下发配置邮件", fmt.Sprintf("目标=%d 成功=%d 无邮箱=%d 失败=%d", len(list), sent, skipped, failed))
+	util.OK(w, map[string]any{"total": len(list), "sent": sent, "skipped": skipped, "failed": failed})
 }
 
 // ---- 小工具 ----

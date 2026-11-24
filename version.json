@@ -1,9 +1,9 @@
 {
-  "version": "1.3.4",
-  "released_at": "2026-11-22",
-  "notes": "KSVPN v1.3.4：管理员双因子登录（TOTP）、会话绑定真实身份可吊销、操作审计归因到人；新增 sslvpn doctor 预检、/health 健康页、/metrics 与四类告警；修复管理员越权、OpenVPN 配置注入等安全问题；档位口径修正，Mac 客户端沿用 v0.5.3。",
-  "package": "https://gitee.com/KingStrongerGee/ks-sslvpn-go/releases/download/v1.3.4/ks-sslvpn-go-v1.3.4.tar.gz",
-  "package_fallback": "https://github.com/kingstronger-ai/ks-sslvpn-go/releases/download/v1.3.4/ks-sslvpn-go-v1.3.4.tar.gz",
-  "sha256": "45bf9ab6bf520a9848476fdb1898e219c09e96765c7a5864c08525b150063954",
+  "version": "1.3.5",
+  "released_at": "2026-11-28",
+  "notes": "KSVPN v1.3.5：MCP 内嵌服务端，AI 客户端配置「地址+API Token」即可连接，无需独立程序；新增 API Token 读写作用域管理与即时吊销（社区版服务端禁止创建 write Token，仅 21 个只读工具；专业版/企业版开放全部 27 个）；管理页新增「MCP 接入」一键生成 Claude/Cursor/WorkBuddy 配置；MCP 使用 Streamable HTTP（回显 MCP-Protocol-Version，默认 2025-06-18，未启用 SSE），高危工具二次确认、Token 操作审计可追溯；VPN 用户列表支持筛选（状态/到期/分组/在线）、分页（每页 20/50/100）与跨页勾选，批量重建配置与批量下发配置邮件；新增「同步 LDAP 状态」对比预览后单向禁用。Mac 客户端沿用 v0.5.3。",
+  "package": "https://gitee.com/KingStrongerGee/ks-sslvpn-go/releases/download/v1.3.5/ks-sslvpn-go-v1.3.5.tar.gz",
+  "package_fallback": "https://github.com/kingstronger-ai/ks-sslvpn-go/releases/download/v1.3.5/ks-sslvpn-go-v1.3.5.tar.gz",
+  "sha256": "b35edb6815320afa5d6abc28ea170061109b894801734d10bb8219c13fa4af66",
   "min_version": "1.2.0"
 }

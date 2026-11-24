@@ -15,7 +15,17 @@ import (
 
 // syslogFromRequest 从会话 token 取真实管理员主体写审计；无法识别身份时记 unknown。
 // 全 handler 统一走这里，避免主体被硬编码为 "admin"。
+// API Token 触发的写操作必须可追溯到具体 Token（前缀 + ID + 创建人），否则
+// 高危操作（踢人 / 停服务 / 升级）在审计里会全部退化成 unknown，事后无法归因。
 func syslogFromRequest(r *http.Request, action, detail string) {
+	if info, ok := middleware.TokenInfoFromContext(r.Context()); ok {
+		subject := fmt.Sprintf("token:%s#%d", info.Prefix, info.ID)
+		if info.CreatedBy != "" {
+			subject += "(" + info.CreatedBy + ")"
+		}
+		db.SyslogWithID(subject, action, fmt.Sprintf("token_id=%d %s", info.ID, detail), clientIP(r), 0)
+		return
+	}
 	subject := middleware.SessionUser(middleware.TokenFromRequest(r))
 	var adminID int64
 	if subject == "" {

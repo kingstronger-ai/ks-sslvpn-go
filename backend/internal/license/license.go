@@ -60,6 +60,7 @@ const (
 	FeatMultiInstance   = "multi_instance"   // 多实例 / 集群部署
 	FeatPrivateIssuance = "private_issuance" // 私有化许可签发与在线登记
 	FeatACMERenew       = "acme_auto_renew"  // 证书自动续签（ACME）
+	FeatMCPWrite        = "mcp_write"        // MCP 写工具（AI 执行踢人/启停实例/升级）
 )
 
 // featureTier 记录每个功能所需的最低档位
@@ -72,6 +73,7 @@ var featureTier = map[string]string{
 	FeatMultiInstance:   TierEnterprise,
 	FeatPrivateIssuance: TierEnterprise,
 	FeatACMERenew:       TierEnterprise,
+	FeatMCPWrite:        TierPro,
 }
 
 // tierRank 档位排序（数值越大档位越高）

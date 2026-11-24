@@ -296,7 +296,7 @@ function logout(silent) {
 /* ================= 主布局（分组侧栏 + 顶栏） ================= */
 const NAV = [
   { title: "运行监控", pages: [["dash", "◎", "运行概览"]] },
-  { title: "监控与安全", pages: [["health", "💚", "健康状态"], ["alert", "🔔", "告警设置"], ["security", "🔐", "安全设置"]] },
+  { title: "监控与安全", pages: [["health", "💚", "健康状态"], ["alert", "🔔", "告警设置"], ["security", "🔐", "安全设置"], ["mcp", "🔌", "MCP 接入"]] },
   { title: "用户与权限", pages: [["users", "👤", "用户账号"], ["ccd", "⚙", "用户策略"], ["ldap", "🔑", "LDAP 目录"], ["online", "📶", "在线会话"]] },
   { title: "连接管理", pages: [["groups", "🗂", "用户分组"], ["services", "🖧", "连接配置"], ["domain", "🌐", "域名分流"]] },
   { title: "系统设置", pages: [["backup", "💾", "备份恢复"], ["clientdl", "⬇", "客户端下载"], ["smtp", "✉", "邮件服务"], ["sso", "🪪", "扫码登录"], ["sys", "☑", "全局设置"], ["fw", "🧱", "访问控制"], ["admins", "🛡", "管理员"], ["license", "🔐", "许可管理"], ["cert", "🔒", "证书管理"], ["upgrade", "⬆", "版本升级"]] },
@@ -306,7 +306,7 @@ const ROUTES = { dash: pageDash, users: pageUsers, ccd: pageCcd, ldap: pageLdap,
   groups: pageGroups, services: pageServices, backup: pageBackup, smtp: pageSmtp, sys: pageSys,
   fw: pageFW, authlog: pageAuthLog, syslog: pageSysLog, license: pageLicense, admins: pageAdmins, cert: pageCert,
   sso: pageFeishu, domain: pageDomain, clientdl: pageClientDownload, upgrade: pageUpgrade,
-  health: pageHealth, alert: pageAlert, security: pageSecurity };
+  health: pageHealth, alert: pageAlert, security: pageSecurity, mcp: pageMcp, ldapStatus: pageLdapStatus };
 
 function renderLayout(page) {
   $app.innerHTML = `
@@ -441,6 +441,57 @@ async function pageDash(main) {
 
 /* ================= 用户配置 ================= */
 let groupMap = {};
+/* 用户列表筛选/分页状态（enter('users') 重绘后保留） */
+let userFilterState = { kw: "", status: "", expire: "", group: "", online: "", size: 20, page: 1 };
+let userSelSet = new Set();      // 跨页保留的勾选账号 ID
+let userSelAllFilter = false;    // 是否已选「全部筛选结果」
+let uPwdMap = {};                // 当前页 id→密码，仅供「复制密码」按钮读取，不写入 DOM
+
+/* 密码列：本地密码只显示前 2 位与后 2 位（中间用 * 代替）；LDAP/扫码账号保持原样，不提供复制 */
+function userMaskPwd(p) {
+  const n = p.length;
+  if (n >= 8) return p.slice(0, 2) + "****" + p.slice(n - 2);
+  if (n >= 5) return p.slice(0, 1) + "*".repeat(3) + p.slice(n - 1);
+  return "****";
+}
+function pwdCell(a) {
+  if (!a.password || a.password === "-") return "•••••";
+  return `<span style="font-family:ui-monospace,Menlo,Consolas,monospace">${esc(userMaskPwd(a.password))}</span>` +
+    `<a href="javascript:;" class="lk" style="margin-left:6px" title="复制完整密码" onclick="userCopyPwd(${a.id})">⧉</a>`;
+}
+function userCopyPwd(id) {
+  const p = uPwdMap[id];
+  if (!p || p === "-") { toast("该账号无本地密码，无法复制", false); return; }
+  copyText(p, "密码");
+}
+function userFilterApply() {
+  userFilterState = {
+    kw: fv("uKw"), status: fv("uStatus"), expire: fv("uExpire"),
+    group: fv("uGroup"), online: fv("uOnline"), size: +fv("uSize") || 20, page: 1
+  };
+  userSelSet.clear(); userSelAllFilter = false;
+  enter("users");
+}
+function userFilterReset() {
+  userFilterState = { kw: "", status: "", expire: "", group: "", online: "", size: 20, page: 1 };
+  userSelSet.clear(); userSelAllFilter = false;
+  enter("users");
+}
+function userPageGo(page, totalPages) {
+  if (page < 1 || (totalPages && page > totalPages)) return;
+  userFilterState.page = page;
+  enter("users");
+}
+async function userSelectAllFiltered() {
+  const st = userFilterState;
+  const qs = new URLSearchParams({ keyword: st.kw, status: st.status, expire: st.expire, group_id: st.group, online: st.online });
+  const r = await api("/account/userlist?" + qs.toString());
+  if (r.code !== 1) return toast(r.msg || "获取列表失败", false);
+  userSelSet = new Set((r.data.list || []).map(x => x.id));
+  userSelAllFilter = true;
+  enter("users");
+}
+function userClearSelection() { userSelSet.clear(); userSelAllFilter = false; enter("users"); }
 async function pageUsers(main) {
   const [g, licR] = await Promise.all([
     api("/group/list"),
@@ -457,31 +508,76 @@ async function pageUsers(main) {
       ? `🔒 授权用户数上限 <b>${esc(String(q.max_users))}</b> 人　·　已用 <b>${used}</b> 人　·　剩余 <b>${left}</b> 人${full ? "　⚠ 已达上限：新增 / 批量导入 / 自助注册 / LDAP 同步都会被拒绝，删除闲置账号或联系授权方更换更大用户数的许可后可继续" : ""}`
       : `VPN 账号共 <b>${used}</b> 个　·　当前许可未限制用户数`}
   </div>`;
-  const kw = fv("uKw");
+  const st = userFilterState;
+  const groupFilterOpts = Object.keys(groupMap).map(k => `<option value="${esc(k)}" ${String(st.group) === String(k) ? "selected" : ""}>${esc(groupMap[k])}</option>`).join("");
   main.innerHTML = `<div class="card">
     <div class="topbar"><h3 style="margin:0">👤 VPN 用户列表</h3>
       <div class="inline">
         <button class="primary" ${full ? 'disabled style="opacity:.55;cursor:not-allowed" title="已达授权用户数上限"' : 'onclick="userAddModal()"'}>＋ 添加用户</button>
         <button class="ghost" onclick="userBatchExpireModal()">🗓 批量设置到期时间</button>
+        <button class="ghost" onclick="userBatchRebuildModal()">🔨 批量重建配置</button>
+        <button class="ghost" onclick="userBatchMailModal()">📧 批量下发配置</button>
+        <button class="orange" onclick="enter('ldapStatus')">⇄ 同步 LDAP 状态</button>
         <button class="ghost" onclick="window.open(API_BASE + '/account/exportDatabase')">📤 导出用户数据表格</button>
         <button class="ghost" onclick="enter('users')">⟳ 刷新</button>
       </div></div>
     ${quotaBar}
-    <div class="inline" style="margin-bottom:12px">
-      <input id="uKw" placeholder="请输入 VPN 用户名" value="${esc(kw)}" style="width:220px"
-        onkeydown="if(event.key==='Enter')enter('users')">
-      <button class="primary" onclick="enter('users')">🔍 搜索</button>
-      <span class="muted" id="uListSelTip" style="margin-left:6px;font-size:12px">未选择账号（勾选左侧复选框可多选，批量设置到期时间）</span>
+    <div class="inline" style="margin-bottom:8px;flex-wrap:wrap;gap:12px">
+      <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer">
+        <input type="checkbox" id="uSelAll" onchange="userToggleAll(this)" title="全选/取消本页"> 全选本页</label>
+      <a href="javascript:;" class="lk" onclick="userSelectAllFiltered()">选择全部筛选结果</a>
+      <span class="badge blue" id="uListSelTip">已选 0 个</span>
+      <a href="javascript:;" class="lk" onclick="userClearSelection()">清空选择</a>
+    </div>
+    <div class="inline" style="margin-bottom:12px;flex-wrap:wrap;gap:8px">
+      <span class="muted" style="font-size:13px">筛选：</span>
+      <select id="uStatus" onchange="userFilterApply()" title="账号状态">
+        <option value="" ${st.status === "" ? "selected" : ""}>账号状态: 全部</option>
+        <option value="1" ${st.status === "1" ? "selected" : ""}>账号状态: 启用</option>
+        <option value="0" ${st.status === "0" ? "selected" : ""}>账号状态: 禁用</option>
+      </select>
+      <select id="uExpire" onchange="userFilterApply()" title="到期状态">
+        <option value="" ${st.expire === "" ? "selected" : ""}>到期状态: 全部</option>
+        <option value="permanent" ${st.expire === "permanent" ? "selected" : ""}>到期状态: 永久</option>
+        <option value="dated" ${st.expire === "dated" ? "selected" : ""}>到期状态: 已设置</option>
+        <option value="expired" ${st.expire === "expired" ? "selected" : ""}>到期状态: 已过期</option>
+      </select>
+      <select id="uGroup" onchange="userFilterApply()" title="所属分组">
+        <option value="" ${st.group === "" ? "selected" : ""}>分组: 全部</option>
+        ${groupFilterOpts}
+      </select>
+      <select id="uOnline" onchange="userFilterApply()" title="在线状态">
+        <option value="" ${st.online === "" ? "selected" : ""}>在线状态: 全部</option>
+        <option value="1" ${st.online === "1" ? "selected" : ""}>在线状态: 在线</option>
+        <option value="0" ${st.online === "0" ? "selected" : ""}>在线状态: 离线</option>
+      </select>
+      <select id="uSize" onchange="userFilterApply()" title="每页条数">
+        ${[20, 50, 100].map(n => `<option value="${n}" ${st.size === n ? "selected" : ""}>每页 ${n} 人</option>`).join("")}
+      </select>
+      <span style="flex:1"></span>
+      <input id="uKw" placeholder="搜索使用人、用户名或认证类型" value="${esc(st.kw)}" style="width:200px"
+        onkeydown="if(event.key==='Enter')userFilterApply()">
+      <button class="primary" onclick="userFilterApply()">🔍 搜索</button>
+      <button class="ghost" onclick="userFilterReset()">重置</button>
+      <button class="ghost" onclick="enter('users')">刷新列表</button>
     </div>
     <p class="muted" style="margin:-4px 0 12px">客户端登录请使用「VPN用户名」列的值；「联系邮箱」只用于接收账号邮件，<b>不是登录账号</b>。若需以邮箱登录，请在「LDAP 用户同步」把搜索过滤器改为 <code>(mail=%s)</code> 后重新同步用户。</p>
     <div id="userTable">${loading}</div></div>`;
-  const d = await api("/account/userlist?keyword=" + encodeURIComponent(kw));
+  const qs = new URLSearchParams({
+    keyword: st.kw, status: st.status, expire: st.expire,
+    group_id: st.group, online: st.online, page: String(st.page), size: String(st.size)
+  });
+  const d = await api("/account/userlist?" + qs.toString());
   const list = d.data.list || [];
+  const total = Number(d.data.total || list.length);
+  const totalPages = Math.max(1, Math.ceil(total / st.size));
   const authName = { local: "本地密码", totp: "TOTP 动态码", ldap: "LDAP存储", feishu: "扫码登录", sso: "扫码登录", dingtalk: "扫码登录", wecom: "扫码登录" };
+  uPwdMap = {};
+  list.forEach(a => { uPwdMap[a.id] = a.password; });
   const rows = list.map(a => `<tr>
-    <td><input type="checkbox" class="uChk" value="${a.id}" onchange="userSelChanged()"></td>
+    <td><input type="checkbox" class="uChk" value="${a.id}" ${userSelSet.has(a.id) ? "checked" : ""} onchange="userSelAllFilter=false;userSelChanged()"></td>
     <td>${esc(a.username)}</td>
-    <td>${esc(a.password === "-" ? "•••••" : a.password)}</td>
+    <td>${pwdCell(a)}</td>
     <td>${esc(a.email || "-")}</td>
     <td>${a.online ? '<span class="badge ok">在线</span>' : '<span class="badge gray">离线</span>'}</td>
     <td>${a.online && a.virtual_ip
@@ -499,26 +595,38 @@ async function pageUsers(main) {
       <a href="javascript:;" class="lk o" onclick="userMail(${a.id})">邮件</a>
       <a href="javascript:;" class="lk r" onclick="userDel(${a.id},'${jsq(a.username)}')">删除</a>
     </td></tr>`).join("");
+  const pager = `<div class="inline" style="justify-content:flex-end;margin-top:12px;gap:10px;font-size:13px">
+    <span class="muted">筛选 <b>${total}</b> / 共 <b>${used}</b> 个账号 · 第 ${st.page} / ${totalPages} 页</span>
+    <button class="ghost small" ${st.page <= 1 ? "disabled" : ""} onclick="userPageGo(${st.page - 1},${totalPages})">‹ 上一页</button>
+    <button class="ghost small" ${st.page >= totalPages ? "disabled" : ""} onclick="userPageGo(${st.page + 1},${totalPages})">下一页 ›</button>
+  </div>`;
   document.getElementById("userTable").innerHTML = list.length ? `<table>
-    <tr><th><input type="checkbox" id="uSelAll" onchange="userToggleAll(this)" title="全选/取消"></th><th>VPN用户名</th><th>密码</th><th>联系邮箱<br><span class="muted" style="font-weight:normal">仅发邮件用</span></th><th>在线状态</th><th>客户端IP</th><th>用户状态</th><th>认证类型</th><th>所属分组</th><th>过期时间</th><th>创建时间</th><th>功能操作</th></tr>${rows}</table>`
-    : `<p class="muted" style="text-align:center;padding:30px 0">暂无用户，点击右上角"添加用户"创建，或从 LDAP配置 → 同步用户 导入</p>`;
+    <tr><th><input type="checkbox" id="uSelAll" onchange="userToggleAll(this)" title="全选本页/取消"></th><th>VPN用户名</th><th>密码<br><span class="muted" style="font-weight:normal">点 ⧉ 复制</span></th><th>联系邮箱<br><span class="muted" style="font-weight:normal">仅发邮件用</span></th><th>在线状态</th><th>客户端IP</th><th>用户状态</th><th>认证类型</th><th>所属分组</th><th>过期时间</th><th>创建时间</th><th>功能操作</th></tr>${rows}</table>${pager}`
+    : `<p class="muted" style="text-align:center;padding:30px 0">${total === 0 ? "没有符合条件的用户，可调整筛选条件或点击\"重置\"" : "暂无用户，点击右上角\"添加用户\"创建，或从 LDAP配置 → 同步用户 导入"}</p>${pager}`;
+  userSelChanged();
 }
-/* ---- 用户列表多选 + 批量设置到期时间 ---- */
+/* ---- 用户列表多选（跨页保留）+ 批量操作 ---- */
 function userToggleAll(box) {
-  document.querySelectorAll(".uChk").forEach(c => { c.checked = box.checked; });
+  document.querySelectorAll(".uChk").forEach(c => {
+    c.checked = box.checked;
+    const id = Number(c.value);
+    if (box.checked) userSelSet.add(id); else userSelSet.delete(id);
+  });
+  userSelAllFilter = false;
   userSelChanged();
 }
 function userSelChanged() {
-  const all = document.querySelectorAll(".uChk").length;
-  const sel = document.querySelectorAll(".uChk:checked").length;
-  const box = document.getElementById("uSelAll");
-  if (box) box.checked = all > 0 && sel === all;
+  document.querySelectorAll(".uChk").forEach(c => {
+    const id = Number(c.value);
+    if (c.checked) userSelSet.add(id); else userSelSet.delete(id);
+  });
+  const boxes = [...document.querySelectorAll(".uChk")];
+  const allBox = document.getElementById("uSelAll");
+  if (allBox) allBox.checked = boxes.length > 0 && boxes.every(c => c.checked);
   const tip = document.getElementById("uListSelTip");
-  if (tip) tip.textContent = sel > 0 ? `已选 ${sel} 个账号` : "未选择账号（勾选左侧复选框可多选，批量设置到期时间）";
+  if (tip) tip.textContent = `已选 ${userSelSet.size} 个${userSelAllFilter ? "（全部筛选结果）" : ""}`;
 }
-function userSelectedIds() {
-  return [...document.querySelectorAll(".uChk:checked")].map(x => Number(x.value));
-}
+function userSelectedIds() { return [...userSelSet]; }
 /* 相对天数 -> YYYY-MM-DD（本地日期） */
 function expireAfterDays(n) {
   const d = new Date();
@@ -547,6 +655,36 @@ function userBatchExpireModal() {
       toast(`已设置 ${r.data.updated} 个账号的到期时间`);
       enter("users");
     }, { okText: "批量设置" });
+}
+/* 批量重建证书配置：吊销旧证书并重新签发，已在线客户端需重新下载配置连接 */
+function userBatchRebuildModal() {
+  const ids = userSelectedIds();
+  if (!ids.length) { toast("请先勾选要重建配置的账号", false); return; }
+  if (ids.length > 100) { toast(`已选 ${ids.length} 个，批量重建单次最多 100 个，请缩小筛选范围后重试`, false); return; }
+  confirmModal(`批量重建配置（已选 ${ids.length} 个账号）`,
+    `将为所选 <b>${ids.length}</b> 个账号<b>吊销旧证书并重新签发</b>客户端配置。<br>
+     ⚠ 重建后这些账号<b>已在线的客户端会断开</b>，需重新下载配置后再连接；单次最多 100 个。确定继续？`,
+    async () => {
+      const r = await api("/account/batchRebuild", { body: { ids } });
+      if (r.code !== 1) return toast(r.msg, false);
+      toast(`重建完成：成功 ${r.data.rebuilt} 个${r.data.failed ? "，失败 " + r.data.failed + " 个" : ""}`);
+      enter("users");
+    });
+}
+/* 批量下发配置邮件：按模板给勾选账号发送含客户端配置的账号邮件 */
+function userBatchMailModal() {
+  const ids = userSelectedIds();
+  if (!ids.length) { toast("请先勾选要下发配置的账号", false); return; }
+  if (ids.length > 100) { toast(`已选 ${ids.length} 个，批量下发单次最多 100 个，请缩小筛选范围后重试`, false); return; }
+  confirmModal(`批量下发配置邮件（已选 ${ids.length} 个账号）`,
+    `将按邮件模板给所选 <b>${ids.length}</b> 个账号发送账号邮件（含客户端配置附件）。<br>
+     未绑定邮箱的账号会跳过；<b>请先在「邮件服务」配置好 SMTP</b>。单次最多 100 个。确定继续？`,
+    async () => {
+      const r = await api("/account/batchSendMailSelected", { body: { ids } });
+      if (r.code !== 1) return toast(r.msg, false);
+      const d = r.data;
+      toast(`下发完成：成功 ${d.sent} 个${d.skipped ? "，无邮箱跳过 " + d.skipped + " 个" : ""}${d.failed ? "，失败 " + d.failed + " 个" : ""}`);
+    });
 }
 /* 生成强随机密码（与服务端 util.RandomPassword 规则一致：大小写+数字，排除易混淆字符） */
 function genStrongPwd(n = 12) {
@@ -852,6 +990,64 @@ function ccdDel(id) {
     const r = await api("/ccd/remove?id=" + id, { method: "DELETE" });
     toast(r.msg, r.code === 1); enter("ccd");
   });
+}
+
+/* ================= LDAP 账号状态同步（预览 → 单向确认禁用） ================= */
+async function pageLdapStatus(main) {
+  main.innerHTML = `<div class="card">
+    <div class="topbar"><h3 style="margin:0">LDAP 账号状态同步</h3>
+      <button class="ghost" onclick="enter('users')">返回 VPN 用户列表</button></div>
+    <div class="tip-banner">ⓘ go-ldap-admin 禁用后会从 OpenLDAP 有效目录移除。本功能只预览并禁用 VPN 中已经不在有效目录的 LDAP 账号；<b>不会删除账号</b>，也不会修改本地密码、TOTP 或飞书账号。</div>
+    <div class="inline" style="gap:14px;margin:16px 0">
+      <div style="flex:1;border:1px solid var(--border,#e4e7ed);border-radius:8px;padding:14px 18px">
+        <div class="muted" style="font-size:13px">OpenLDAP 有效账号</div><div id="lpsLdap" style="font-size:26px;font-weight:600;color:var(--primary)">-</div></div>
+      <div style="flex:1;border:1px solid var(--border,#e4e7ed);border-radius:8px;padding:14px 18px">
+        <div class="muted" style="font-size:13px">VPN LDAP 账号</div><div id="lpsVpn" style="font-size:26px;font-weight:600;color:var(--primary)">-</div></div>
+      <div style="flex:1;border:1px solid var(--border,#e4e7ed);border-radius:8px;padding:14px 18px">
+        <div class="muted" style="font-size:13px">待自动禁用</div><div id="lpsTo" style="font-size:26px;font-weight:600;color:#f56c6c">-</div></div>
+    </div>
+    <div class="inline" style="gap:8px;margin-bottom:14px">
+      <button class="primary" onclick="ldapStatusCheck()">检查同步状态</button>
+      <button class="danger" id="lpsApply" disabled onclick="ldapStatusApply()">确认禁用待处理账号</button>
+    </div>
+    <div id="lpsTable"><p class="muted" style="padding:24px 0;text-align:center">点击「检查同步状态」开始对比</p></div>
+    <p class="muted" style="margin-top:14px;font-size:12px">安全策略：仅单向禁用，不自动重新启用；LDAP 查询失败、结果不完整或预览后名单变化时停止执行。</p>
+  </div>`;
+}
+async function ldapStatusCheck() {
+  const box = document.getElementById("lpsTable");
+  box.innerHTML = loading;
+  document.getElementById("lpsApply").disabled = true;
+  try {
+    const r = await api("/ldap/statusCheck");
+    if (r.code !== 1) { box.innerHTML = errBox(r.msg || "检查失败"); return; }
+    const d = r.data;
+    document.getElementById("lpsLdap").textContent = d.ldap_active;
+    document.getElementById("lpsVpn").textContent = d.vpn_ldap;
+    document.getElementById("lpsTo").textContent = d.to_disable;
+    window._ldapStatusToken = d.token;
+    const items = d.items || [];
+    if (!items.length) {
+      box.innerHTML = `<table><tr><th>使用人</th><th>VPN 用户名</th><th>联系邮箱</th><th>处理动作</th></tr></table><p class="muted" style="text-align:center;padding:24px 0">没有需要禁用的 LDAP 账号</p>`;
+      document.getElementById("lpsTable").insertAdjacentHTML("beforeend", `<p style="color:#67c23a;font-size:13px">差异检查完成，请核对名单后确认</p>`);
+      return;
+    }
+    box.innerHTML = `<table><tr><th>使用人</th><th>VPN 用户名</th><th>联系邮箱</th><th>处理动作</th></tr>${items.map(it =>
+      `<tr><td>${esc(it.display_name || "-")}</td><td>${esc(it.username)}</td><td>${esc(it.email || "-")}</td><td><span class="badge off">禁用</span></td></tr>`).join("")}</table>
+      <p style="color:#67c23a;font-size:13px">差异检查完成，请核对名单后确认</p>`;
+    document.getElementById("lpsApply").disabled = false;
+  } catch (e) { box.innerHTML = errBox("检查失败: " + e.message); }
+}
+function ldapStatusApply() {
+  const token = window._ldapStatusToken;
+  if (!token) return toast("请先检查同步状态", false);
+  confirmModal("确认禁用待处理 LDAP 账号",
+    `将禁用预览中的 LDAP 账号（仅禁用，不删除、不重新启用）。预览后若 LDAP 名单变化会自动停止。确定继续？`,
+    async () => {
+      const r = await api("/ldap/statusApply", { body: { token } });
+      toast(r.msg || `已禁用 ${r.data?.disabled || 0} 个账号`, r.code === 1);
+      if (r.code === 1) { window._ldapStatusToken = ""; document.getElementById("lpsApply").disabled = true; ldapStatusCheck(); }
+    });
 }
 
 /* ================= LDAP 配置 ================= */
@@ -2260,9 +2456,10 @@ async function pageLicense(main) {
         <div style="margin:10px 0 4px"><b>④ 限制 VPN 用户数</b>（<code>-max-users N</code>；不传或为 0 = <b>不限制</b>）：</div>
         <code style="display:inline-block">./sslvpn license-gen -key deploy/keys/license-private.pem -bind none -email 客户邮箱@xx.com -company "某某公司" -edition pro -max-users 50</code>
         <div style="margin-top:10px;line-height:1.9">
-          <b>档位</b>：社区版 = 核心 VPN；专业版 = ＋域名分流 / SSO / CCD / LDAP / 客户端分发；企业版 = ＋多实例 / 私有化签发 / 证书自动续签。<br>
+          <b>档位</b>：社区版 = 核心 VPN ＋ MCP 只读工具；专业版 = ＋域名分流 / SSO / CCD / LDAP / 客户端分发 / MCP 写工具；企业版 = ＋多实例 / 私有化签发 / 证书自动续签。<br>
           <b>用户数</b>：<code>-max-users N</code> 限制 VPN 账号总数（含禁用账号；管理员账号不计入），到达上限后新增 / 批量导入 / 自助注册 / LDAP 同步返回 <b>403</b>；不传或为 0 不限制，早期签发的旧许可串同样不限制。用量在本页与「VPN 用户列表」顶部实时显示，删除闲置账号可释放额度。<br>
           超出档位的高级接口返回 <b>403</b>，试用到期未激活返回 <b>402</b>；激活后刷新本页，菜单按新档位更新。<br>
+          MCP 写工具按档位裁剪：社区版服务端禁止创建 write Token，仅提供 21 个只读工具；专业版及以上按 Token scope 开放全部 27 个，写 Token 创建接口同样受档位硬拦截。<br>
           <b>私钥路径按当前目录写</b>：在 <code>deploy/keys/</code> 下执行时 <code>-key</code> 改为 <code>./license-private.pem</code>。<br>
           浮动许可同时仅限 <b>1 台服务器</b>在用（<code>-nodes</code> 管的是<b>服务器台数</b>，与 <code>-max-users</code> 的<b>账号数</b>是两个独立维度）：换机时先在原机点「解除激活」，再到新机激活；限制同时在线连接数请到「连接配置 → 编辑实例」调整「最大客户端数」。<br>
           需要强约束（同一许可只能一台机器激活）时启用在线登记：<code>sslvpn license-registry</code> + 环境变量
@@ -2943,6 +3140,251 @@ function mfaRecoveryModal() {
       toast("恢复码已重置");
       showRecoveryCodes((r.data && r.data.recovery_codes) || [], "新恢复码");
     });
+}
+
+/* ================= MCP 接入（内嵌 MCP 端点 + API Token 管理） ================= */
+/* MCP 已内嵌服务端，常驻可用，没有独立的启停开关；Token 是唯一连接凭证。 */
+function mcpEndpoint() { return location.protocol + "//" + location.host + "/api/v1/mcp"; }
+
+/* 工具清单（与后端 internal/mcp/tools.go 的 27 个工具一致；read 21 / write 6） */
+const MCP_READ_TOOLS = [
+  ["ksvpn_status", "版本、运行状态、实例数、在线数、证书与磁盘的一页摘要"],
+  ["ksvpn_health", "健康探针摘要，detail=true 时返回全部检查项"],
+  ["ksvpn_instances", "列出 VPN 服务实例及运行状态"],
+  ["ksvpn_online_users", "列出当前在线用户与会话信息"],
+  ["ksvpn_metrics", "抓取 /metrics 指标文本，失败回退 /api/v1/metrics"],
+  ["ksvpn_alert_history", "最近 50 条告警历史"],
+  ["ksvpn_alert_config", "查询告警配置（敏感项已打码）"],
+  ["ksvpn_list_accounts", "按用户名关键字查询 VPN 账号列表"],
+  ["ksvpn_account_detail", "按用户名或 id 查询账号详情（口令已脱敏）"],
+  ["ksvpn_admin_sessions", "列出全部管理员会话及吊销状态、IP/UA"],
+  ["ksvpn_audit_log", "导出审计日志（json/csv，可按时间与动作过滤）"],
+  ["ksvpn_login_stats", "近 30 天登录统计（按 action 聚合）"],
+  ["ksvpn_service_list", "列出 VPN 服务实例（与 instances 同源）"],
+  ["ksvpn_group_list", "列出用户分组及每组用户数/关联实例数"],
+  ["ksvpn_ccd_list", "列出 CCD 逐用户配置，可按实例 id 过滤"],
+  ["ksvpn_port_rules", "查询端口规则列表"],
+  ["ksvpn_upgrade_status", "升级流程状态、进度、备份与代理心跳"],
+  ["ksvpn_upgrade_check", "检查是否有新版本（仅检测，不触发升级）"],
+  ["ksvpn_backups", "列出升级前自动备份"],
+  ["ksvpn_certificates", "列出 PKI 已签发证书"],
+  ["ksvpn_license_info", "授权档位、机器码与用户数占用"],
+];
+const MCP_WRITE_TOOLS = [
+  ["ksvpn_kick_user", "强制在线用户下线；all=true 批量踢（高风险）"],
+  ["ksvpn_stop_all_vpn", "停止全部 VPN 实例，所有客户端断开（需 confirm=I_KNOW）"],
+  ["ksvpn_revoke_session", "按 jti 吊销指定管理员会话"],
+  ["ksvpn_service_start", "启动指定 VPN 服务实例"],
+  ["ksvpn_service_stop", "停止指定 VPN 服务实例"],
+  ["ksvpn_upgrade_apply", "执行在线升级并可能重启服务（需 confirm=UPGRADE）"],
+];
+const MCP_CLIENT_NOTES = {
+  claude: "将下方配置写入 Claude Desktop 的 claude_desktop_config.json，保存后重启客户端。",
+  cursor: "在 Cursor 的 MCP 配置文件（mcp.json）中加入下方配置，启用后即可在对话中调用 ksvpn 工具。",
+  workbuddy: "在 WorkBuddy 的 MCP 服务器配置中添加下方配置，连接名可自定义为 ksvpn。",
+};
+
+function mcpScopeBadge(scope) {
+  return scope === "write"
+    ? '<span class="badge" style="background:#fff3e0;color:#d97706">write · 可写-谨慎</span>'
+    : '<span class="badge blue">read · 只读</span>';
+}
+function mcpTokenStatus(t) {
+  if (t.revoked) return '<span class="badge gray">已吊销</span>';
+  if (t.expires_at && Number(t.expires_at) <= Math.floor(Date.now() / 1000)) return '<span class="badge off">已过期</span>';
+  return '<span class="badge ok">正常</span>';
+}
+
+async function pageMcp(main) {
+  // 档位未知时按允许处理（后端仍会硬拦截），避免网络抖动误隐藏整个 MCP 页面
+  const writeAllowed = window.tierAllow ? window.tierAllow("mcp_write") : true;
+  main.innerHTML = `
+  <div class="card" style="border-left:5px solid var(--primary)">
+    <div class="topbar"><h3 style="margin:0">🔌 MCP 接入</h3>
+      <button class="ghost" onclick="enter('mcp')">⟳ 刷新</button></div>
+    <div class="tip-banner" style="line-height:1.9"><b>MCP 已内嵌在 KSVPN 服务端</b>，无需安装或运行任何独立程序；VPN 服务运行中即可连接，<b>没有启停开关</b>，在本页生成 Token 后把「地址 + Token」交给 AI 客户端即可使用。</div>
+    ${writeAllowed ? "" : `<div class="err-box" style="margin-top:10px;line-height:1.9">ⓘ <b>当前为社区版</b>，MCP 仅提供 <b>21 个只读工具</b>（查询状态 / 会话 / 日志 / 升级检查等）。写工具（<b>踢人</b>、<b>启停实例</b>、<b>执行升级</b>）需专业版及以上，可在「许可管理」升级。</div>`}
+    <div class="form-row"><label>MCP 地址</label>
+      <div class="inline" style="flex:1"><code id="mcpEndpointText" style="background:var(--border,#f5f7fa);padding:7px 10px;border-radius:6px;word-break:break-all">${esc(mcpEndpoint())}</code>
+        <button class="ghost small" onclick="mcpCopyEndpoint()">⧉ 一键复制</button></div></div>
+    <div class="tip-banner" style="margin-top:8px">ⓘ 请使用<b>对外 HTTPS 地址</b>（默认 <code>https://服务器地址:8443</code>）；若通过 <code>127.0.0.1:8080</code> 等仅本机可访问的地址打开管理页，复制出的地址 AI 客户端将无法连接。</div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h3>🤖 AI 客户端配置</h3>
+    <div class="tip-banner">ⓘ 先把创建时复制的<b>完整明文 Token</b>粘贴到下方，配置里的 Token 会自动填入；留空则显示占位符 <code>&lt;YOUR_TOKEN&gt;</code>。</div>
+    <div class="form-row"><label>Bearer Token</label>
+      <input id="mcpTokenInput" placeholder="ksvpn_...（粘贴创建时复制的完整明文 Token）" style="flex:1;font-family:monospace" oninput="mcpRefreshConfig()"></div>
+    <div class="inline" style="gap:8px;margin:12px 0">
+      <button class="primary small" data-mcp-tab="claude" onclick="mcpSwitchTab('claude')">Claude Desktop</button>
+      <button class="ghost small" data-mcp-tab="cursor" onclick="mcpSwitchTab('cursor')">Cursor</button>
+      <button class="ghost small" data-mcp-tab="workbuddy" onclick="mcpSwitchTab('workbuddy')">WorkBuddy</button>
+    </div>
+    <div id="mcpClientNote" class="muted" style="font-size:13px">${esc(MCP_CLIENT_NOTES.claude)}</div>
+    <pre id="mcpConfigPre" style="background:var(--border,#f5f7fa);border-radius:6px;padding:14px;font-family:monospace;font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-all;overflow:auto;margin:10px 0"></pre>
+    <button class="primary" onclick="mcpCopyConfig()">⧉ 复制配置</button>
+  </div>
+
+  <div class="card wide" style="margin-top:16px">
+    <div class="topbar"><h3 style="margin:0">🎫 API Token 管理</h3>
+      <div class="inline"><button class="ghost" onclick="mcpTestModal('')">🔍 验证 Token</button>
+        <button class="ghost" onclick="enter('mcp')">⟳ 刷新</button></div></div>
+    <div id="mcpTokenBox">${loading}</div>
+    <h3 style="margin-top:20px">＋ 创建新 Token</h3>
+    <div class="tip-banner">ⓘ 服务端只保存哈希，<b>明文 Token 仅在创建成功后显示一次</b>，关闭弹窗即无法再次查看，请立即复制保存。仅 session 登录可管理 Token。</div>
+    <div class="form-row"><label class="req">名称</label><input id="mcpTokenName" maxlength="64" placeholder="例如：cursor-办公本"></div>
+    <div class="form-row"><label>权限范围</label>
+      <div class="inline" style="gap:18px">
+        <label style="display:inline-flex;align-items:center;gap:6px"><input type="radio" name="mcpScope" value="read" checked onchange="mcpScopeChange()"> read（只读，推荐）</label>
+        <label style="display:inline-flex;align-items:center;gap:6px"><input type="radio" name="mcpScope" value="write" onchange="mcpScopeChange()" ${writeAllowed ? "" : "disabled"}> write（可写）${writeAllowed ? "" : `<span class="badge off">需专业版</span>`}</label>
+      </div>
+      <div id="mcpWriteWarn" class="err-box" style="display:none;margin-top:8px;line-height:1.8">⚠ 写权限允许 AI 执行<b>踢人 / 启停服务 / 升级</b>等高风险操作，请谨慎。提交时还会再次确认。</div></div>
+    <div class="form-row"><label>有效期</label>
+      <select id="mcpExpires" style="max-width:200px">
+        <option value="7">7 天</option><option value="30" selected>30 天</option><option value="90">90 天</option><option value="0">永久（不建议，需定期轮换）</option>
+      </select></div>
+    <div class="form-row"><label></label><button class="primary" onclick="mcpTokenCreate()">＋ 创建 Token</button></div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h3>🧰 可用工具说明</h3>
+    <div class="tip-banner">${writeAllowed ? `ⓘ <b>read scope</b> 只能看到 21 个只读工具；<b>write scope</b> 可见全部 27 个（含 6 个写工具）。两种 Token 均可连接 MCP 端点，区别只在可调用的工具范围。` : `ⓘ 当前档位仅开放 <b>21 个只读工具</b>；写工具需专业版及以上。`}</div>
+    <details open style="margin-top:12px"><summary style="cursor:pointer;font-weight:600;padding:8px 0">📖 只读工具（21 个）· read / write 均可见</summary>
+      <table><tr><th style="width:210px">工具名</th><th>说明</th></tr>
+        ${MCP_READ_TOOLS.map(([n, d]) => `<tr><td><code>${esc(n)}</code></td><td>${esc(d)}</td></tr>`).join("")}</table></details>
+    <details style="margin-top:8px"><summary style="cursor:pointer;font-weight:600;padding:8px 0">✍️ 写工具（6 个）· 仅 write scope 可见（谨慎授权）${writeAllowed ? "" : `<span class="badge off">当前档位不可用</span>`}</summary>
+      <table><tr><th style="width:210px">工具名</th><th>说明</th></tr>
+        ${MCP_WRITE_TOOLS.map(([n, d]) => `<tr><td><code>${esc(n)}</code></td><td>${esc(d)}</td></tr>`).join("")}</table></details>
+  </div>`;
+  await Promise.all([renderMcpTokenList(), mcpRefreshConfig()]);
+}
+
+/* ---- 地址 / 客户端配置 ---- */
+function mcpCopyEndpoint() { copyText(mcpEndpoint(), "MCP 地址"); }
+function mcpConfigText() {
+  const el = document.getElementById("mcpTokenInput");
+  const tok = ((el && el.value) || "").trim() || "<YOUR_TOKEN>";
+  return JSON.stringify({ mcpServers: { ksvpn: { type: "http", url: mcpEndpoint(), headers: { Authorization: "Bearer " + tok } } } }, null, 2);
+}
+function mcpRefreshConfig() {
+  const pre = document.getElementById("mcpConfigPre");
+  if (pre) pre.textContent = mcpConfigText();
+}
+function mcpSwitchTab(key) {
+  document.querySelectorAll("[data-mcp-tab]").forEach(b => { b.className = (b.dataset.mcpTab === key ? "primary" : "ghost") + " small"; });
+  const note = document.getElementById("mcpClientNote");
+  if (note) note.textContent = MCP_CLIENT_NOTES[key] || "";
+}
+function mcpCopyConfig() { copyText(mcpConfigText(), "MCP 配置"); }
+
+/* ---- Token 列表 ---- */
+async function renderMcpTokenList() {
+  const box = document.getElementById("mcpTokenBox");
+  if (!box) return;
+  let d;
+  try { d = await api("/apitoken/list"); }
+  catch (e) { box.innerHTML = errBox(e.message); return; }
+  if (d.code !== 1) { box.innerHTML = errBox(d.msg || "Token 列表加载失败"); return; }
+  const list = (d.data && Array.isArray(d.data.list)) ? d.data.list : [];
+  if (!list.length) { box.innerHTML = `<p class="muted" style="text-align:center;padding:24px 0">暂无 API Token，请在下方创建。</p>`; return; }
+  const writeAllowed = window.tierAllow ? window.tierAllow("mcp_write") : true;
+  box.innerHTML = `<table><tr><th>名称</th><th>prefix</th><th>权限</th><th>创建人</th><th>创建时间</th><th>最后使用</th><th>过期时间</th><th>状态</th><th>操作</th></tr>
+    ${list.map(t => `<tr>
+      <td>${esc(t.name)}</td>
+      <td><code>${esc(t.prefix)}</code></td>
+      <td>${mcpScopeBadge(t.scope)}${!writeAllowed && t.scope === "write" ? `<div class="muted" style="font-size:11px;margin-top:3px">社区版下实际只读</div>` : ""}</td>
+      <td>${esc(t.created_by || "-")}</td>
+      <td class="muted">${esc(fmtTime(t.created_at))}</td>
+      <td class="muted">${esc(fmtTime(t.last_used_at))}</td>
+      <td class="muted">${esc(t.expires_at ? fmtTime(t.expires_at) : "永久")}</td>
+      <td>${mcpTokenStatus(t)}</td>
+      <td style="white-space:nowrap"><a class="lk" href="javascript:;" onclick="mcpTestModal('${jsq(t.prefix || "")}')">验证</a>
+        ${t.revoked ? "" : `<a class="lk r" href="javascript:;" onclick="mcpRevoke(${Number(t.id)}, '${jsq(t.name)}')">吊销</a>`}</td>
+    </tr>`).join("")}</table>`;
+}
+
+/* ---- 创建 Token（明文仅显示一次） ---- */
+function mcpScopeChange() {
+  const w = document.getElementById("mcpWriteWarn");
+  const sel = document.querySelector('input[name="mcpScope"]:checked');
+  if (w) w.style.display = (sel && sel.value === "write") ? "block" : "none";
+}
+async function mcpTokenCreate() {
+  const name = (fv("mcpTokenName") || "").trim();
+  if (!name) return toast("请输入 Token 名称", false);
+  const sel = document.querySelector('input[name="mcpScope"]:checked');
+  const scope = (sel && sel.value) || "read";
+  // 服务端创建接口已按档位硬拦截 write；前端也挡住脚本强制选中被 disabled 的单选项，避免无谓请求
+  if (scope === "write" && window.tierAllow && !window.tierAllow("mcp_write")) {
+    return toast("写权限需专业版及以上，当前档位只能创建只读 Token", false);
+  }
+  const days = parseInt(fv("mcpExpires"), 10);
+  const doCreate = async () => {
+    const r = await api("/apitoken/create", { method: "POST", body: { name, scope, expires_days: isNaN(days) ? 0 : days } });
+    if (r.code !== 1) return toast(r.msg || "创建失败", false);
+    toast("Token 已创建");
+    const n = document.getElementById("mcpTokenName"); if (n) n.value = "";
+    const inp = document.getElementById("mcpTokenInput");
+    if (inp && r.data && r.data.token) inp.value = r.data.token;   // 一步到位：同步填入配置区
+    mcpRefreshConfig();
+    await renderMcpTokenList();
+    mcpShowTokenModal(r.data || {});
+  };
+  if (scope === "write") {
+    confirmModal("写权限风险确认", `<div class="err-box" style="line-height:1.9"><b>写权限允许 AI 执行踢人 / 启停服务 / 升级等高风险操作。</b><br>请确认只把 Token 交给可信的 AI 客户端并妥善保管。日常使用建议选择 read 只读权限。</div>`, doCreate);
+  } else {
+    await doCreate();
+  }
+}
+function mcpShowTokenModal(d) {
+  const tok = d.token || "";
+  closeModal("mTokenShow");
+  $app.insertAdjacentHTML("beforeend", `<div class="modal-mask" id="mTokenShow"><div class="modal" style="width:600px;border-top:5px solid #f56c6c">
+    <h3>✅ API Token 已创建</h3>
+    <div class="err-box" style="line-height:1.9"><b>仅此一次显示，请立即复制！</b><br>关闭本窗口后无法再次查看明文 Token，服务端只保存哈希。</div>
+    <div class="form-row"><label>名称</label><b>${esc(d.name || "-")}</b></div>
+    <div class="form-row"><label>权限</label>${mcpScopeBadge(d.scope)}</div>
+    <div class="form-row"><label>过期时间</label><b>${esc(d.expires_at ? fmtTime(d.expires_at) : "永久有效")}</b></div>
+    <div class="form-row"><label>明文 Token</label>
+      <textarea id="mTokenPlain" readonly style="flex:1;min-height:72px;font-family:monospace;word-break:break-all">${esc(tok)}</textarea></div>
+    <div class="actions"><button class="ghost" onclick="closeModal('mTokenShow')">我已保存，关闭</button>
+      <button class="primary" onclick="copyText(fv('mTokenPlain'),'Token')">⧉ 复制 Token</button></div>
+  </div></div>`);
+}
+
+/* ---- 验证 / 吊销 Token ---- */
+function mcpTestModal(prefixHint) {
+  closeModal("mTokenTest");
+  $app.insertAdjacentHTML("beforeend", `<div class="modal-mask" id="mTokenTest"><div class="modal" style="width:540px">
+    <h3>🔍 验证 API Token</h3>
+    <div class="tip-banner">ⓘ 粘贴创建时保存的<b>完整明文 Token</b>进行验证；结果只显示有效性与权限，不回显 Token 本身。</div>
+    <div class="form-row"><label class="req">Token</label>
+      <input id="mTestToken" placeholder="${esc(prefixHint ? prefixHint + "…" : "ksvpn_...")}" style="flex:1;font-family:monospace"></div>
+    <div id="mTestResult"></div>
+    <div class="actions"><button class="ghost" onclick="closeModal('mTokenTest')">关 闭</button>
+      <button class="primary" id="mTestBtn">验 证</button></div>
+  </div></div>`);
+  document.getElementById("mTestBtn").onclick = async () => {
+    const tk = (fv("mTestToken") || "").trim();
+    if (!tk) return toast("请输入 Token", false);
+    const box = document.getElementById("mTestResult");
+    try {
+      const r = await api("/apitoken/test", { method: "POST", body: { token: tk } });
+      if (r.code !== 1) { if (box) box.innerHTML = errBox(r.msg || "验证失败"); return toast(r.msg || "验证失败", false); }
+      const v = r.data || {};
+      if (box) box.innerHTML = `<div class="${v.valid ? "tip-banner" : "err-box"}" style="line-height:1.9">
+        <b>${v.valid ? "✅ Token 有效" : "❌ Token 无效、已过期或已吊销"}</b><br>
+        名称：${esc(v.name || "-")}　权限：${mcpScopeBadge(v.scope)}<br>说明：${esc(v.msg || "-")}</div>`;
+    } catch (e) { if (box) box.innerHTML = errBox(e.message); }
+  };
+}
+function mcpRevoke(id, name) {
+  confirmModal("吊销 API Token", `<div class="err-box" style="line-height:1.9">确认吊销 <b>${esc(name)}</b> 吗？<br>吊销后使用该 Token 的 AI 客户端将<b>立即无法连接</b>，且此操作不可撤销。</div>`, async () => {
+    const r = await api("/apitoken/revoke", { method: "POST", body: { id: Number(id) } });
+    if (r.code !== 1) return toast(r.msg || "吊销失败", false);
+    toast("Token 已吊销");
+    await renderMcpTokenList();
+  });
 }
 
 /* ================= 启动 ================= */

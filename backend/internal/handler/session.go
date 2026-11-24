@@ -22,6 +22,10 @@ func AdminSessions(w http.ResponseWriter, r *http.Request) {
 func AdminSessionRevoke(w http.ResponseWriter, r *http.Request) {
 	caller, ok := currentAdmin(r)
 	if !ok {
+		if _, isToken := middleware.TokenInfoFromContext(r.Context()); isToken {
+			util.Fail(w, "API Token 没有管理员会话身份，不支持吊销管理员会话；请在管理页操作")
+			return
+		}
 		util.Fail(w, "登录状态缺少身份信息，请重新登录后再操作")
 		return
 	}

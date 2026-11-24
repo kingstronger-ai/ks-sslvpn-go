@@ -2,18 +2,22 @@
 package middleware
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"sslvpn/internal/db"
+	"sslvpn/internal/license"
 )
 
 var sessionSecret []byte
@@ -29,7 +33,9 @@ func MakeSession() string { return MakeSessionFor("") }
 // MakeSessionFor 签发带管理员身份但无 jti 的 token（expiry|subject|hmac）。
 // 仅为兼容上一版格式与测试保留；正式登录请用 MakeSessionFull 获得可吊销能力。
 // subject 为空时签发最旧的 expiry.hmac 格式。
-func MakeSessionFor(subject string) string { return signToken(time.Now().Add(sessionTTL).Unix(), subject, "") }
+func MakeSessionFor(subject string) string {
+	return signToken(time.Now().Add(sessionTTL).Unix(), subject, "")
+}
 
 // MakeSessionFull 签发正式会话：expiry|subject|jti|hmac，并登记 admin_session（12h）。
 // jti 为 16 字节随机 base64url（不含 '|'，可安全作为分段）。
@@ -304,6 +310,12 @@ func CheckRequest(r *http.Request) bool {
 // Auth 登录校验中间件：未登录或会话已被服务端吊销返回 code=401
 func Auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// API Token 已在 TokenAuthDispatch 完成校验与 scope 检查，这里直接放行，
+		// 否则 token 请求（无 session cookie）会被二次拦截返回 401。
+		if _, tokenOK := TokenInfoFromContext(r.Context()); tokenOK {
+			next.ServeHTTP(w, r)
+			return
+		}
 		_, jti, ok := parseToken(tokenFromRequest(r))
 		if !ok || (jti != "" && !SessionActive(jti)) {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -401,4 +413,256 @@ func SecurityHeaders(next http.Handler) http.Handler {
 				"img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; object-src 'none'")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// ---------- API Token 认证（与现有 session 认证并行，互不影响） ----------
+//
+// 集成提示：业务 handler 不需要区分认证方式，只需在 main.go 的 apiEntry 外层包一层
+// handler.TokenAuthDispatch（确切代码片段见 KSVPN-API-Token-实现说明.md）。
+// 带 Bearer ksvpn_ 的请求走本节校验；不带 token 的请求原样落到现有 session 认证。
+
+const (
+	APITokenPrefix    = "ksvpn_"
+	APITokenPrefixLen = 12 // "ksvpn_" + 6 位随机串，如 ksvpn_A1b2C3
+	TokenScopeRead    = "read"
+	TokenScopeWrite   = "write"
+
+	tokenMaxFails     = 10
+	tokenLockDuration = 10 * time.Minute
+)
+
+// TokenInfo 通过 API Token 校验后得到的身份信息（不含明文/hash）
+type TokenInfo struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Scope     string `json:"scope"`
+	CreatedBy string `json:"created_by"`
+	Prefix    string `json:"prefix"`
+}
+
+type tokenContextKey struct{}
+
+// TokenInfoFromContext 取出 TokenAuth / TokenAuthDispatch 注入的 TokenInfo
+func TokenInfoFromContext(ctx context.Context) (TokenInfo, bool) {
+	info, ok := ctx.Value(tokenContextKey{}).(TokenInfo)
+	return info, ok
+}
+
+// HashAPIToken 返回明文 token 的 sha256 hex（库中只存这个值）
+func HashAPIToken(plain string) string {
+	sum := sha256.Sum256([]byte(plain))
+	return hex.EncodeToString(sum[:])
+}
+
+// NewAPIToken 生成明文 ksvpn_ + 32 字节 crypto/rand 的 base64url（无 padding，约 49 字符）。
+// 返回 (明文, sha256, 前 12 位 prefix)；明文只在创建响应里出现一次。
+func NewAPIToken() (plain, hash, prefix string, err error) {
+	b := make([]byte, 32)
+	if _, err = rand.Read(b); err != nil {
+		return "", "", "", err
+	}
+	plain = APITokenPrefix + base64.RawURLEncoding.EncodeToString(b)
+	return plain, HashAPIToken(plain), plain[:APITokenPrefixLen], nil
+}
+
+// AuthenticateToken 查库、hmac.Equal 常量时间比对 hash，检查 revoked/expires_at，
+// 成功后容错更新 last_used_at（写失败不影响认证结果）。
+func AuthenticateToken(token string) (TokenInfo, bool) {
+	var zero TokenInfo
+	if len(token) < APITokenPrefixLen || !strings.HasPrefix(token, APITokenPrefix) || db.DB == nil {
+		return zero, false
+	}
+	hash := HashAPIToken(token)
+	rows, err := db.DB.Query(`SELECT id,name,token_hash,scope,created_by,prefix,revoked,expires_at
+		FROM api_token WHERE prefix=?`, token[:APITokenPrefixLen])
+	if err != nil {
+		return zero, false
+	}
+	var found TokenInfo
+	matched := false
+	now := time.Now().Unix()
+	for rows.Next() {
+		var info TokenInfo
+		var storedHash string
+		var revoked int
+		var expiresAt int64
+		if rows.Scan(&info.ID, &info.Name, &storedHash, &info.Scope, &info.CreatedBy,
+			&info.Prefix, &revoked, &expiresAt) != nil {
+			continue
+		}
+		// 常量时间比较防时序侧信道；prefix 只是索引预筛，真正凭据是 hash。
+		if !hmac.Equal([]byte(storedHash), []byte(hash)) {
+			continue
+		}
+		if revoked != 0 || (expiresAt != 0 && now > expiresAt) {
+			break
+		}
+		if info.Scope != TokenScopeRead && info.Scope != TokenScopeWrite {
+			break
+		}
+		found, matched = info, true
+		break
+	}
+	rows.Close()
+	if !matched {
+		return zero, false
+	}
+	// 容错写：写失败绝不拒绝请求（如只读副本/短暂锁）。
+	_, _ = db.DB.Exec(`UPDATE api_token SET last_used_at=? WHERE id=?`, now, found.ID)
+	return found, true
+}
+
+// EffectiveAPITokenScope 返回 Token 在当前授权档位下的**实际** scope。
+// 社区版 / 试用 / 未激活时 write Token 一律降级为 read：不仅 MCP 写工具不可用，
+// 通用 /api/v1 写接口同样不可用，避免绕过「社区版只读」承诺。
+func EffectiveAPITokenScope(info TokenInfo) string {
+	if info.Scope == TokenScopeWrite && !license.AllowFeature(license.FeatMCPWrite) {
+		return TokenScopeRead
+	}
+	return info.Scope
+}
+
+// scopeSatisfies：required="" 或 "read" 时 read/write 均可；"write" 仅 write 可通过。
+func scopeSatisfies(actual, required string) bool {
+	if required == "" || required == TokenScopeRead {
+		return actual == TokenScopeRead || actual == TokenScopeWrite
+	}
+	return actual == TokenScopeWrite
+}
+
+func writeTokenUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = w.Write([]byte(`{"code":401,"msg":"API Token 无效或权限不足"}`))
+}
+
+// tokenFailures 是独立的按 IP 失败计数器：loginFailState 在 handler 包内且未导出，
+// middleware 无法复用；这里用等价的 10 次/10min 策略 + 独立 map（带锁，惰性清理）。
+var tokenFailures = struct {
+	sync.Mutex
+	m map[string]*tokenFailState
+}{m: map[string]*tokenFailState{}}
+
+type tokenFailState struct {
+	fails       int
+	lockedUntil time.Time
+}
+
+// tokenClientIP 只认远端地址，默认不采信 X-Forwarded-For/X-Real-IP（与 login.go 的 clientIP 策略一致）。
+func tokenClientIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && host != "" {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func tokenIPLocked(ip string) bool {
+	tokenFailures.Lock()
+	defer tokenFailures.Unlock()
+	st := tokenFailures.m[ip]
+	if st == nil {
+		return false
+	}
+	if !st.lockedUntil.IsZero() && time.Now().After(st.lockedUntil) {
+		delete(tokenFailures.m, ip)
+		return false
+	}
+	return st.fails >= tokenMaxFails
+}
+
+func recordTokenFail(ip string) {
+	tokenFailures.Lock()
+	defer tokenFailures.Unlock()
+	st := tokenFailures.m[ip]
+	if st == nil {
+		st = &tokenFailState{}
+		tokenFailures.m[ip] = st
+	}
+	st.fails++
+	if st.fails >= tokenMaxFails && st.lockedUntil.IsZero() {
+		st.lockedUntil = time.Now().Add(tokenLockDuration)
+	}
+}
+
+func clearTokenFail(ip string) {
+	tokenFailures.Lock()
+	delete(tokenFailures.m, ip)
+	tokenFailures.Unlock()
+}
+
+// bearerAPIToken 只从 Authorization: Bearer 取 token（API Token 不接受 cookie，避免与 session 混用）。
+func bearerAPIToken(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, "Bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+}
+
+// TokenAuth 中间件：从 Bearer 取 token 校验；requiredScope="write" 时强制 write 权限。
+// 失败返回 HTTP 401 + {"code":401,"msg":"API Token 无效或权限不足"}；成功把 TokenInfo 放入 context。
+func TokenAuth(next http.Handler, requiredScope string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := tokenClientIP(r)
+		if tokenIPLocked(ip) {
+			writeTokenUnauthorized(w)
+			return
+		}
+		info, ok := AuthenticateToken(bearerAPIToken(r))
+		if ok {
+			// 与 TokenAuthDispatch / MCPTokenAuth 同一口径：任何 Token 鉴权入口
+			// 都不得让社区版 write Token 获得通用 API 的写权限。
+			info.Scope = EffectiveAPITokenScope(info)
+		}
+		if !ok || !scopeSatisfies(info.Scope, requiredScope) {
+			recordTokenFail(ip)
+			writeTokenUnauthorized(w)
+			return
+		}
+		clearTokenFail(ip)
+		ctx := context.WithValue(r.Context(), tokenContextKey{}, info)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// TokenAuthDispatch 供 main.go 的 apiEntry 外层包裹：
+//   - 带 Bearer ksvpn_ token：按 method 判 scope（GET/HEAD=read，其它=write）校验，通过后调 fallback；
+//   - 不带 token（或 Bearer 非 ksvpn_ 的旧 session token）：原样走 fallback，继续用现有 session 认证。
+//
+// 业务 handler 无需区分认证方式；需要身份时用 TokenInfoFromContext(r.Context())。
+func TokenAuthDispatch(fallback http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := bearerAPIToken(r)
+		if token == "" || !strings.HasPrefix(token, APITokenPrefix) {
+			fallback(w, r)
+			return
+		}
+		required := TokenScopeRead
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			required = TokenScopeWrite
+		}
+		ip := tokenClientIP(r)
+		if tokenIPLocked(ip) {
+			writeTokenUnauthorized(w)
+			return
+		}
+		info, ok := AuthenticateToken(token)
+		if !ok {
+			recordTokenFail(ip)
+			writeTokenUnauthorized(w)
+			return
+		}
+		// 档位降级在鉴权层生效：社区版 write Token 只能以 read 身份进入业务 handler，
+		// 也杜绝 AI 客户端绕过 MCP 直接 POST /api/v1 写接口。
+		info.Scope = EffectiveAPITokenScope(info)
+		if !scopeSatisfies(info.Scope, required) {
+			recordTokenFail(ip)
+			writeTokenUnauthorized(w)
+			return
+		}
+		clearTokenFail(ip)
+		ctx := context.WithValue(r.Context(), tokenContextKey{}, info)
+		fallback(w, r.WithContext(ctx))
+	}
 }

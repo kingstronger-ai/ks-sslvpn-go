@@ -235,6 +235,19 @@ func migrate() error {
 			consumed INTEGER DEFAULT 0,
 			created_at INTEGER NOT NULL DEFAULT 0,
 			expires_at INTEGER NOT NULL DEFAULT 0)`,
+		// API Token（供 ksvpn-mcp / 第三方 AI 自动化客户端调用管理 API）。
+		// 明文只返回一次，库里仅存 sha256；prefix 用于列表辨认与校验时按索引预筛。
+		`CREATE TABLE IF NOT EXISTS api_token(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			token_hash TEXT UNIQUE NOT NULL,
+			prefix TEXT NOT NULL,
+			scope TEXT NOT NULL DEFAULT 'read',
+			created_by TEXT DEFAULT '',
+			created_at INTEGER NOT NULL,
+			last_used_at INTEGER DEFAULT 0,
+			expires_at INTEGER DEFAULT 0,
+			revoked INTEGER DEFAULT 0)`,
 		`CREATE INDEX IF NOT EXISTS idx_account_expire ON account(expire_date)`,
 		`CREATE INDEX IF NOT EXISTS idx_syslog_time ON syslog(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_syslog_action ON syslog(action,created_at)`,
@@ -243,6 +256,8 @@ func migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_sso_device_expire ON sso_device(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_sso_device_state ON sso_device(state)`,
 		`CREATE INDEX IF NOT EXISTS idx_sso_token_expire ON sso_token(expires_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_api_token_hash ON api_token(token_hash)`,
+		`CREATE INDEX IF NOT EXISTS idx_api_token_prefix ON api_token(prefix)`,
 	}
 	for _, s := range stmts {
 		if _, err := DB.Exec(s); err != nil {

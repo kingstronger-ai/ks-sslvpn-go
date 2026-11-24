@@ -40,6 +40,7 @@ import (
 	"sslvpn/internal/handler"
 	"sslvpn/internal/healthcheck"
 	"sslvpn/internal/license"
+	mcpserver "sslvpn/internal/mcp"
 	"sslvpn/internal/middleware"
 	"sslvpn/internal/util"
 	"sslvpn/internal/vpn"
@@ -412,6 +413,11 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	// MCP 端点内嵌：复用主 mux 做内部回环调用，Token scope 决定工具可见范围。
+	// 只绑定一次主 mux（之后只读），不另起进程、不监听额外端口。
+	mcpserver.Bind(mux)
+	mux.HandleFunc(handler.APIPath("/mcp"), middleware.MCPTokenAuth(http.HandlerFunc(mcpserver.ServeHTTP)).ServeHTTP)
+
 	// ---- API 路由 ----
 	// 规范前缀：/api/v1/<基路径>（唯一的对外契约）
 	// 旧前缀（裸路径 /logincheck、/api/logincheck）默认仍可用，便于灰度切换；
@@ -504,11 +510,13 @@ func registerAPIRoutes(mux *http.ServeMux, legacyAlias bool) {
 		rt := rt
 		base := path
 		// 规范路径（唯一契约）
-		mux.HandleFunc(handler.APIPath(base), apiEntry(base, rt, true))
+		// 外层包 TokenAuthDispatch：带 Bearer ksvpn_ 的请求按 read/write scope 校验
+		// API Token；不带 token 的请求原样走既有 session 认证，行为不变。
+		mux.HandleFunc(handler.APIPath(base), middleware.TokenAuthDispatch(apiEntry(base, rt, true)))
 		if legacyAlias {
 			// 旧别名：裸路径（原 nginx 反代剥前缀后的形态）与 /api/xxx
-			mux.HandleFunc(base, apiEntry(base, rt, false))
-			mux.HandleFunc("/api"+base, apiEntry(base, rt, false))
+			mux.HandleFunc(base, middleware.TokenAuthDispatch(apiEntry(base, rt, false)))
+			mux.HandleFunc("/api"+base, middleware.TokenAuthDispatch(apiEntry(base, rt, false)))
 		}
 	}
 }
